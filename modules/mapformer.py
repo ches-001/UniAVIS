@@ -74,8 +74,10 @@ class MapFormer(TrackFormer):
             bev_features, track_queries, track_queries_mask
         )
 
-        mask_coefs   = detections[..., (detections.shape[-1] - self.num_seg_coeffs):]
-        bev_features = bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
-        protos       = self.proto_seg_module(bev_features)
-        masks        = torch.einsum("nast,nshw->nahw", mask_coefs[..., None], protos)
+        coef_dim_trunc = detections.shape[-1] - self.num_seg_coeffs
+        mask_coefs     = detections[..., coef_dim_trunc:]
+        detections     = detections[..., :coef_dim_trunc]
+        bev_features   = bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
+        protos         = self.proto_seg_module(bev_features)
+        masks          = torch.einsum("nast,nshw->nahw", mask_coefs[..., None], protos)
         return output, detections, masks, track_mask, layers_results
