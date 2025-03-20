@@ -198,16 +198,16 @@ class TrackFormer(nn.Module):
 
         output = queries
         
-        layer_results = []
+        layers_results = []
         for decoder_idx in range(0, len(self.decoder_modules)):
             output = self.decoder_modules[decoder_idx](
                 queries=output + queries,
                 bev_features=bev_features,
                 ref_points=ref_points
             )
-            layer_results.append(self.detection_module(output))
+            layers_results.append(self.detection_module(output))
             
-        layer_results = torch.stack(layer_results, dim=0)
-        detections    = layer_results[-1]
-        track_mask    = detections[..., 0] >= self.track_threshold
-        return output, detections, track_mask, layer_results
+        layers_results = torch.stack(layers_results, dim=0)
+        detections     = layers_results[-1]
+        track_mask     = detections[..., 0] >= self.track_threshold
+        return output, detections, track_mask, layers_results

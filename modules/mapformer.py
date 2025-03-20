@@ -10,19 +10,16 @@ class ProtoSegModule(nn.Module):
             in_channels: int, 
             out_channels: int=32, 
             c_h: int=256, 
-            upsample_mode: str="bilinear"
         ):
         super(ProtoSegModule, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.conv1 = ConvBNorm(self.in_channels, c_h, kernel_size=3)
-        self.upsample = nn.Upsample(scale_factor=2, mode=upsample_mode)
         self.conv2 = ConvBNorm(c_h, c_h, kernel_size=3)
         self.conv3 = ConvBNorm(c_h, self.out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv1(x)
-        out = self.upsample(out)
         out = self.conv2(out)
         out = self.conv3(out)
         return out
@@ -34,20 +31,18 @@ class MapFormer(TrackFormer):
     # this is a custom designed architecture that combines deformable DETR decoder (https://arxiv.org/pdf/2010.04159)
     # with YOLACT (https://arxiv.org/pdf/1904.02689) for instance segmentation.
 
-    def __init__(self, *args, num_seg_coeffs: int=32, seg_c_h: int=256, upsample_mode: str="bilinear", **kwargs):
+    def __init__(self, *args, num_seg_coeffs: int=32, seg_c_h: int=256, **kwargs):
         super(MapFormer, self).__init__(*args, **kwargs)
 
         assert num_seg_coeffs > 0
         
         self.num_seg_coeffs = num_seg_coeffs
         self.seg_c_h        = seg_c_h
-        self.upsample_mode  = upsample_mode
 
         self.proto_seg_module = ProtoSegModule(
-            self.embed_dim, 
+            in_channels=self.embed_dim, 
             out_channels=num_seg_coeffs, 
             c_h=seg_c_h, 
-            upsample_mode=upsample_mode
         )
 
         self.detection_module = DetectionHead(
@@ -62,7 +57,7 @@ class MapFormer(TrackFormer):
             bev_features: torch.Tensor, 
             track_queries: Optional[torch.Tensor]=None,
             track_queries_mask: Optional[torch.Tensor]=None,
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.BoolTensor]:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor]:
 
         """
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
@@ -75,10 +70,12 @@ class MapFormer(TrackFormer):
         """
         batch_size = bev_features.shape[0]
 
-        output, detections, track_mask, layer_results = super(MapFormer, self).forward(
+        output, detections, track_mask, layers_results = super(MapFormer, self).forward(
             bev_features, track_queries, track_queries_mask
         )
 
-        bev_features = bev_features.permute(0, 2, 1).reshape(batch_size, self.num_seg_coeffs, *self.bev_feature_shape)
+        mask_coefs   = detections[..., (detections.shape[-1] - self.num_seg_coeffs):]
+        bev_features = bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
         protos       = self.proto_seg_module(bev_features)
-        return output, detections, protos, track_mask, layer_results
+        masks        = torch.einsum("nast,nshw->nahw", mask_coefs[..., None], protos)
+        return output, detections, masks, track_mask, layers_results
