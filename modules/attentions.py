@@ -602,13 +602,12 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         assert multiscale_fmap_shapes.shape[0] == self.num_fmap_levels
         assert z_refs.shape[0] == self.num_z_ref_points
 
-        batch_size, _, C_bev  = bev_queries.shape
-        num_views             = multiscale_fmaps.shape[1]
-        H_img, W_img          = img_spatial_shape[0]
-        H_bev, W_bev          = bev_spatial_shape[0]
-        H_bev                 = H_bev.item()
-        W_bev                 = W_bev.item()
-        device                = bev_queries.device
+        batch_size, *_ = bev_queries.shape
+        num_views      = multiscale_fmaps.shape[1]
+        H_bev, W_bev   = bev_spatial_shape[0]
+        H_bev          = H_bev.item()
+        W_bev          = W_bev.item()
+        device         = bev_queries.device
 
         # Create BEV 2D grids pace
         xindex          = torch.arange(W_bev, device=device)
@@ -648,13 +647,13 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         scaled_ref_points = ref_points / max_xy[None, None, None, :, None, :]
         attention_mask    = (scaled_ref_points[..., 0] >= 0) & (scaled_ref_points[..., 1] <= 1)
 
-        output  = super(SpatialCrossAttention, self).forward(
+        output = super(SpatialCrossAttention, self).forward(
             queries=bev_queries, 
             ref_points=ref_points, 
             value=multiscale_fmaps, 
             value_spatial_shapes=multiscale_fmap_shapes, 
             attention_mask=attention_mask
         )
-        # TODO: apply 1/|v_hit| to output
-        return output
+        v_hit  = attention_mask.sum(dim=(2, 3, 4))[..., None]
+        return (1 / v_hit) * output
         
