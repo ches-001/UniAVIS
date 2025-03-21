@@ -60,6 +60,8 @@ class MapFormer(TrackFormer):
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor]:
 
         """
+        Input
+        --------------------------------
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
         :track_queries: (N, max_objs, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
@@ -67,10 +69,24 @@ class MapFormer(TrackFormer):
         :track_queries_mask: (N, max_objs) or (N, max_objs, 1), mask of valid track queries. This will be used to 
                             replace initialized detection queries at t > 0 timesteps with valid track queries
                             (track queries with class scores greater than some threshold)
+
+        Returns
+        --------------------------------
+        :output: (N, max_objs, embed_dim) batch of output context query for each segmented item
+                    (including invalid detections)
+
+        :detections: (N, max_objs, det_params) batch of detection for multiple identified items
+
+        :masks: (N, max_objs, H_bev, W_bev), batch of multi-item segmentations
+
+        :track_queries_mask: (N, max_objs), newly computed track query masks pertaining to 
+                                valid and invalid-detections
+
+        :layers_results: (num_layers, N, max_objs, embed_dim), output context query of each layer
         """
         batch_size = bev_features.shape[0]
 
-        output, detections, track_mask, layers_results = super(MapFormer, self).forward(
+        output, detections, track_queries_mask, layers_results = super(MapFormer, self).forward(
             bev_features, track_queries, track_queries_mask
         )
 
@@ -80,4 +96,4 @@ class MapFormer(TrackFormer):
         bev_features   = bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
         protos         = self.proto_seg_module(bev_features)
         masks          = torch.einsum("nast,nshw->nahw", mask_coefs[..., None], protos)
-        return output, detections, masks, track_mask, layers_results
+        return output, detections, masks, track_queries_mask, layers_results

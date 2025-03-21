@@ -88,6 +88,11 @@ class PosEmbedding1D(nn.Module):
             self.register_buffer("pos_embs", pos_embs)
 
     def forward(self) -> torch.Tensor:
+        """
+        Returns
+        --------------------------------
+        :output: (1, seq_len, embed_dim)
+        """
         if self.learnable:
             device   = self.pos_emb_module.weight.device
             pos      = torch.arange(0, self.seq_len, device=device)
@@ -142,6 +147,11 @@ class PosEmbedding2D(nn.Module):
             self.register_buffer("y_pos_embs", y_pos_embs)
 
     def forward(self) -> torch.Tensor:
+        """
+        Returns
+        --------------------------------
+        :output: (1, num_embed, H, W), (where: H = y_dim, X = x_dim)
+        """
         if self.learnable:
             device        = self.x_pos_emb_module.weight.device
             x_pos         = torch.arange(0, self.x_dim, device=device)
@@ -167,7 +177,13 @@ class SpatialSinusoidalPosEmbedding(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
+        Input
+        --------------------------------
         :x: (N, ..., 2) batch of raw x and y spatial coordinates
+
+        Returns
+        --------------------------------
+        :output: (N, ..., embed_dim)
         """
         input_og_shape           = input.shape
         input                    = input.reshape(input_og_shape[0], -1, input_og_shape[-1])
@@ -222,7 +238,13 @@ class DetectionHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
+        Input
+        --------------------------------
         :x: (N, max_objs, embed_dim) output of the final TrackFormerDecoderLayer in the TrackFormer net
+
+        Returns
+        --------------------------------
+        :output: (N, max_objs, det_params) (det params = 8 or 4)
         """
         out       = self.inception_module(x)
         obj_score = self.obj_module(out)

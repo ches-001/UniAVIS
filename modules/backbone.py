@@ -44,7 +44,14 @@ class ResNetBackBone(resnet.ResNet):
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         """
+        Input
+        --------------------------------
         :x: (N, C, H, W) or (N*V, C, H, W), batch of input images (where V is number of views)
+
+        Returns
+        --------------------------------
+        :multiscale_fmaps: List[(N, out_C, H_fmap, W_fmap)], list of feature maps of various spatial resolutions form
+                        different levels
         """
         x = self.conv1(x)
         x = self.bn1(x)

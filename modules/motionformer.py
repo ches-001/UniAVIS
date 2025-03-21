@@ -61,16 +61,23 @@ class MotionFormerDecoderLayer(nn.Module):
         ) -> torch.Tensor:
 
         """
+        Input
+        --------------------------------
         :bev_features: (N, H_bev * W_bev, (C_bev or embed_dim)) Bird eye view features from BEVFormer
 
-        :queries: (N, num_queries, embed_dim), context query from previous layer + corresponding positional embedding
+        :queries: (N, num_agents * k, embed_dim), context query from previous layer + corresponding positional embedding
+                 (k = num_modes or number of modes)
 
-        :agent_queries: (N, n_a, embed_dim) Agent queries from the TrackFormer network (n_a = number of agents)
+        :agent_queries: (N, num_agents, embed_dim) Agent queries from the TrackFormer network
 
-        :map_queries: (N, n_m, embed_dim) Map queries from the Mapformer network (n_m = number of mapped areas)
+        :map_queries: (N, num_maps, embed_dim) Map queries from the Mapformer network
 
-        :proj_matrix: (N, n_a, 3, 3) projection matrix that projects each agent from agent-level coordinates to 
+        :proj_matrix: (N, num_agents, 3, 3) projection matrix that projects each agent from agent-level coordinates to 
                       global-level coordinates (in homogeneous coordinates) in the real world
+
+        Returns
+        --------------------------------
+        output: (N, num_queries, embed_dim), output queries to be fed into the next layer
         """
         self_attn_queries  = self.self_attention(queries, queries, queries)
         self_attn_queries  = self.self_addnorm(self_attn_queries, queries)
@@ -159,7 +166,6 @@ class MotionFormer(nn.Module):
             nn.Linear(self.embed_dim, self.dim_feedforward),
             nn.ReLU(),
             nn.Linear(self.dim_feedforward, self.trajectory_length * 5),
-            nn.Softmax(dim=-1)
         )
 
     def _create_decoder_layers(self) -> nn.ModuleList:
@@ -186,7 +192,9 @@ class MotionFormer(nn.Module):
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         """
-        :agent_current_pos: (N, n_a, 2) batch of current positions of multiple agents
+        Input
+        --------------------------------
+        :agent_current_pos: (N, num_agents, 2) batch of current positions of multiple agents
 
         :agent_anchors: (K, T, 2) a cluster of agent level trajectory points for K-modalities, 
                               T is length of trajectory. Agent level means that the point is relative
@@ -194,13 +202,23 @@ class MotionFormer(nn.Module):
 
         :bev_features: (N, H_bev * W_bev, (C_bev or embed_dim)) Bird eye view features from BEVFormer
 
-        :agent_queries: (N, n_a, embed_dim) Agent queries from the TrackFormer network (n_a = number of agents)
+        :agent_queries: (N, num_agents, embed_dim) Agent queries from the TrackFormer network (num_agents = number of agents)
 
-        :map_queries: (N, n_m, embed_dim) Map queries from the Mapformer network (n_m = number of mapped areas)
+        :map_queries: (N, num_maps, embed_dim) Map queries from the Mapformer network (num_maps = number of mapped areas)
 
-        :proj_matrix: (N, n_a, 3, 3) projection (rotation and translation combined) matrix that projects each 
+        :proj_matrix: (N, num_agents, 3, 3) projection (rotation and translation combined) matrix that projects each 
                       agent from agent-level coordinates to global-level coordinates (in homogeneous coordinates)
                       in the real world
+
+        Returns
+        --------------------------------
+        :ctx_queries: (N, num_agents, k, embed_dim), MotionFormer final context query output
+
+        :mode_trajectories: (N, num_agents, k, T, 5), batch of estimated k-mode T-long trajectories for each agent
+                            (k = number of modes, T = length of trajectory). 
+                            Last dim corresponds to (u_x, u_y, log_sigma_x, log_sigma_y, x_y_corr)
+
+        :mode_scores: (N, num_agents, K), batch of estimated probability scores for each k-mode
         """
         batch_size, *_   = bev_features.shape
         k, *_            = agent_anchors.shape
@@ -218,7 +236,7 @@ class MotionFormer(nn.Module):
         # I^s = scene level anchors
         # NOTE: here, we only really need the last timestep of the agent level anchors and the scene level anchors.
         # agent_anchors shape: (1, 1,   k, 2)
-        # scene_anchors shape: (N, n_a, k, 2)
+        # scene_anchors shape: (N, num_agents, k, 2)
         agent_anchors = agent_anchors[:, -1, :]
         agent_anchors = agent_anchors[None, None, :, :]
         ones          = torch.ones(*agent_anchors.shape[:-1], 1, dtype=agent_anchors.dtype, device=device)
@@ -227,7 +245,7 @@ class MotionFormer(nn.Module):
         scene_anchors = scene_anchors[..., :2, 0]
 
         # initialize the agent goal position to the last timestep of the scene level anchor for the first decoder layer
-        # and expand the dimensions of the agent_current_pos to (N, n_a, 1, 2) to match the rest
+        # and expand the dimensions of the agent_current_pos to (N, num_agents, 1, 2) to match the rest
         agent_goal_pos        = scene_anchors
 
         agent_current_pos     = agent_current_pos[..., None, :]
@@ -244,7 +262,7 @@ class MotionFormer(nn.Module):
 
         queries               = ctx_queries + query_pos_emb
 
-        # reshape agent_goal_pos to (N, n_a, 2) and create a ones tensor to set it and the next agent_goal_pos to
+        # reshape agent_goal_pos to (N, num_agents, 2) and create a ones tensor to set it and the next agent_goal_pos to
         # homogeneous coordinate and tile k-times along the second axis
         agent_goal_pos        = agent_goal_pos[..., 0, :].tile(1, k, 1)
         ones                  = torch.ones(*agent_goal_pos.shape[:-1], 1, dtype=agent_anchors.dtype, device=device)
@@ -258,9 +276,9 @@ class MotionFormer(nn.Module):
             # we set the reference points for the deformable attention between the queries and the bev features to
             # scene-level goal positions predicted in the previous layer of each agent, we then convert the scene
             # level coordinates to BEV grid space coordinates. Since the reference points are computed from the goal
-            # positions (which have a shape of (N, n_a, 2)), we tile the second dimension by k, ensuring that each
+            # positions (which have a shape of (N, num_agents, 2)), we tile the second dimension by k, ensuring that each
             # modality has the same reference points, and to also match the referencce points to the context query
-            # which has a shape of (N, n_a * k, num_embed)
+            # which has a shape of (N, num_agents * k, num_embed)
             ref_points  = torch.concat([agent_goal_pos, ones], dim=-1)
             ref_points  = torch.einsum("naii,naik->naik", proj_matrix, ref_points[..., None])
             ref_points  = ref_points[..., :2, 0][..., None, :]

@@ -18,6 +18,8 @@ class DotProductAttention(nn.Module):
             attention_mask: Optional[torch.BoolTensor]=None,
         ) -> torch.Tensor:
         """
+        Input
+        --------------------------------
         :Q: (N, ..., query_len, embed_dim), attention queries, where N = batch_size
         
         :K: (N, ..., key_len, embed_dim) or (N, num_head, key_len, embed_dim), attention keys
@@ -27,6 +29,10 @@ class DotProductAttention(nn.Module):
         :padding_mask: (N, ..., query_len), padding mask (0 if padding, else 1)
 
         :attention_mask: (N, ..., query_len, query_len), attention mask (0 if not attended to, else 1)
+
+        Returns
+        --------------------------------
+        :output: (N, query_len, embed_dim)
         """
         assert Q.ndim == K.ndim and K.ndim == V.ndim
         assert Q.ndim == 3 or Q.ndim == 4
@@ -81,6 +87,8 @@ class MultiHeadedAttention(nn.Module):
         ) -> torch.Tensor:
 
         """
+        Input
+        --------------------------------
         :Q: (N, query_len, embed_dim), attention queries, where N = batch_size
         
         :K: (N, key_len, embed_dim), attention keys
@@ -90,6 +98,10 @@ class MultiHeadedAttention(nn.Module):
         :padding_mask: (N, query_len), padding mask (0 if padding, else 1)
 
         :attention_mask: (N, query_len, query_len), attention mask (0 if not attended to, else 1)
+
+        Returns
+        --------------------------------
+        :output: (N, query_len, embed_dim)
         """
         
         assert Q.shape[-1] % self.num_heads == 0, f"vector dimension of Q must be divisible by {self.num_heads}"
@@ -166,7 +178,9 @@ class DeformableAttention(nn.Module):
         ) -> torch.Tensor:
 
         """
-        :queries:        (N, query_len, C) where N = batch_size
+        Input
+        --------------------------------
+        :queries:        (N, query_len, embed_dim) where N = batch_size
 
         :ref_points:     (N, query_len, L, 2) for reference points for value (multiscale feature maps) 
                          eg: [[x0, y0], ..., [xn, yn]], NOTE: this will further be normalized to be within range [-1, 1]
@@ -177,6 +191,10 @@ class DeformableAttention(nn.Module):
         :value_spatial_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
         :attention_mask: (N, query_len, L), attention mask (0 if to ignore, else 1)
+
+        Returns
+        --------------------------------
+        :output: (N, query_len, embed_dim)
         """
         assert value_spatial_shapes.shape[0] == self.num_fmap_levels 
         assert ref_points.shape[1] == queries.shape[1] 
@@ -326,7 +344,9 @@ class MultiView3DDeformableAttention(DeformableAttention):
             attention_mask: Optional[torch.BoolTensor]=None,
         ) -> torch.Tensor:
         """
-        :queries:        (N, query_len, C) where N = batch_size
+        Input
+        --------------------------------
+        :queries:        (N, query_len, embed_dim) where N = batch_size
 
         :ref_points:    (N, query_len, num_views, L, z_refs, 2) for reference points for 
                         value (multiscale feature maps) eg: [[x0, y0], ...[xn, yn]], NOTE: this will further
@@ -338,6 +358,10 @@ class MultiView3DDeformableAttention(DeformableAttention):
         :value_spatial_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
         :attention_mask: (N, query_len, num_views, L, z_refs), attention mask (0 if to ignore, else 1)
+
+        Returns
+        --------------------------------
+        :output: (N, query_len, embed_dim), output BEV features / queries
         """
 
         assert value_spatial_shapes.shape[0] == self.num_fmap_levels 
@@ -475,6 +499,8 @@ class TemporalSelfAttention(DeformableAttention):
         ) -> torch.Tensor:
 
         """
+        Input
+        --------------------------------
         :bev_queries:   (N, H_bev * W_bev, C_bev) where N = batch_size
 
         :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
@@ -483,6 +509,10 @@ class TemporalSelfAttention(DeformableAttention):
 
         :transition_matrices: (N, 3, 3) the matrix that transitions the ego vehicle from t-1 to t 
                               (in homogeneous coordinates)
+                              
+        Returns
+        --------------------------------
+        :output: (N, H_bev * W_bev, C_bev), output BEV features / queries that have been attended to temporally
         """
 
         batch_size, _, C_bev = bev_queries.shape
@@ -584,6 +614,8 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         ) -> torch.Tensor:
         
         """
+        Input
+        --------------------------------
         :bev_queries:    (N, H_bev * W_bev, C_bev) where N = batch_size
 
         :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
@@ -598,6 +630,10 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         :z_refs: (num_z_ref_points, ) z-axis reference points
 
         :cam_proj_matrices: (V, 3, 4) projection matrix of cameras, from real coord to image coord
+
+        Returns
+        --------------------------------
+        :output: (N, H_bev * W_bev, C_bev), output BEV features / queries that have been attended to spatially
         """
         assert multiscale_fmap_shapes.shape[0] == self.num_fmap_levels
         assert z_refs.shape[0] == self.num_z_ref_points

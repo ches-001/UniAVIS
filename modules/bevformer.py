@@ -75,6 +75,8 @@ class BEVFormerEncoderLayer(nn.Module):
         ) -> torch.Tensor:
 
         """
+        Input
+        --------------------------------
         :bev_queries: (N, H_bev * W_bev, C_bev), BEV queries
 
         :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
@@ -94,6 +96,10 @@ class BEVFormerEncoderLayer(nn.Module):
                             coordinate to 
 
         :bev_histories: (N, H_bev * W_bev, C_bev), BEV features from previous timestep t-1
+
+        Returns
+        --------------------------------
+        :output: (N, H_bev * W_bev, C_bev), output BEV queries to be fed into the next layer
         """
         
         out1 = self.temporal_self_attn(
@@ -198,6 +204,8 @@ class BEVFormer(nn.Module):
             bev_histories: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
+        Input
+        --------------------------------
         :imgs: (N, V, C, H, W) batch of multiview images
 
         :transition_matrices: (N, 3, 3), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
@@ -208,6 +216,10 @@ class BEVFormer(nn.Module):
         :bev_histories: (N, H_bev*W_bev, C_bev), BEV features from previous timestep t-1
 
         NOTE: Do note that the BEV grid space is merely a discretized global (real world) coordinate space.
+
+        Returns
+        --------------------------------
+        :output: (N, H_bev * W_bev, C_bev), output BEV features
         """
         batch_size, num_views, C_img, H_img, W_img = imgs.shape
         H_bev, W_bev = self.bev_query_shape

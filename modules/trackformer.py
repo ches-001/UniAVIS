@@ -56,11 +56,17 @@ class TrackFormerDecoderLayer(nn.Module):
             ref_points: torch.Tensor, 
         ) -> torch.Tensor:
         """
+        Input
+        --------------------------------
         :queries: (N, num_queries, det_embeds) list of tensors of shape
 
         :bev_features: (N, W_bev * H_bev, (C_bev or embed_dim))
 
         :ref_points: (N, num_queries, 1, 2), reference points for the deformable attention
+
+        Returns
+        --------------------------------
+        :output: (N, num_queries, embed_dim), output queries to be fed into the next layer
         """
         H_bev, W_bev = self.bev_feature_shape
         assert bev_features.shape[1] == H_bev * W_bev
@@ -142,6 +148,8 @@ class TrackFormer(nn.Module):
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor]:
 
         """
+        Input
+        --------------------------------
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
         :track_queries: (N, max_objs, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
@@ -149,6 +157,18 @@ class TrackFormer(nn.Module):
         :track_queries_mask: (N, max_objs) or (N, max_objs, 1), mask of valid track queries. This will be used to 
                             replace initialized detection queries at t > 0 timesteps with valid track queries
                             (track queries with class scores greater than some threshold)
+
+        Returns
+        --------------------------------
+        :output: (N, max_objs, embed_dim) batch of output context query for each segmented item
+                (including invalid detections)
+
+        :detections: (N, max_objs, det_params) batch of detection for multiple identified items
+
+        :track_queries_mask: (N, max_objs), newly computed track query masks pertaining to 
+                                valid and invalid-detections
+
+        :layers_results: (num_layers, N, max_objs, embed_dim), output context query of each layer
         """
         is_track_queries      = track_queries is not None
         is_track_queries_mask = track_queries_mask is not None
@@ -208,6 +228,6 @@ class TrackFormer(nn.Module):
             layers_results.append(self.detection_module(output))
             
         layers_results = torch.stack(layers_results, dim=0)
-        detections     = layers_results[-1]
-        track_mask     = detections[..., 0] >= self.track_threshold
-        return output, detections, track_mask, layers_results
+        detections             = layers_results[-1]
+        track_queries_mask     = detections[..., 0] >= self.track_threshold
+        return output, detections, track_queries_mask, layers_results
