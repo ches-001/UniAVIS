@@ -42,7 +42,7 @@ class TrackFormerDecoderLayer(nn.Module):
             concat_vq_for_offset=False,
         )
         self.addnorm2            = AddNorm(input_dim=self.embed_dim)
-        self.feedforward_module  = nn.Sequential(
+        self.mlp                 = nn.Sequential(
             nn.Linear(self.embed_dim, self.dim_feedforward),
             nn.ReLU(),
             nn.Linear(self.dim_feedforward, self.embed_dim),
@@ -77,7 +77,7 @@ class TrackFormerDecoderLayer(nn.Module):
         bev_spatial_shape = torch.LongTensor([[H_bev, W_bev]], device=queries.device)
         out3              = self.deform_attention(out2, ref_points, bev_features, bev_spatial_shape)
         out4              = self.addnorm2(out2, out3)
-        out5              = self.feedforward_module(out4)
+        out5              = self.mlp(out4)
         out6              = self.addnorm3(out4, out5)
         return out6
 
@@ -88,12 +88,12 @@ class TrackFormer(nn.Module):
             num_heads: int, 
             embed_dim: int,
             num_layers: int,
-            num_obj_classes: int,
+            num_classes: int,
             num_ref_points: int=4,
             dim_feedforward: int=512, 
             dropout: float=0.1,
             offset_scale: float=1.0,
-            max_objs: int=100,
+            max_detections: int=100,
             learnable_pe: bool=True,
             bev_feature_shape: Tuple[int, int]=(200, 200),
             track_threshold: float=0.5,
@@ -104,26 +104,26 @@ class TrackFormer(nn.Module):
         self.num_heads         = num_heads
         self.embed_dim         = embed_dim
         self.num_layers        = num_layers
-        self.num_obj_classes   = num_obj_classes
+        self.num_classes       = num_classes
         self.num_ref_points    = num_ref_points
         self.dim_feedforward   = dim_feedforward
         self.dropout           = dropout
         self.offset_scale      = offset_scale
-        self.max_objs          = max_objs
+        self.max_detections    = max_detections
         self.learnable_pe      = learnable_pe
         self.bev_feature_shape = bev_feature_shape
         self.track_threshold   = track_threshold
         self.det_3d            = det_3d
 
         self.detection_pos_emb  = PosEmbedding1D(
-            self.max_objs, 
+            self.max_detections, 
             embed_dim=self.embed_dim, 
             learnable=learnable_pe
         )
         self.decoder_modules    = self._create_decoder_layers()
         self.detection_module   = DetectionHead(
             embed_dim=self.embed_dim, 
-            num_obj_class=self.num_obj_classes, 
+            num_classes=self.num_classes, 
             det_3d=self.det_3d,
             num_seg_coefs=None
         )
@@ -152,23 +152,24 @@ class TrackFormer(nn.Module):
         --------------------------------
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
-        :track_queries: (N, max_objs, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
+        :track_queries: (N, max_detections, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
+                        NOTE: max_detections includes number of valid detections + number of invalid detections
 
-        :track_queries_mask: (N, max_objs) or (N, max_objs, 1), mask of valid track queries. This will be used to 
+        :track_queries_mask: (N, max_detections) or (N, max_detections, 1), mask of valid track queries. This will be used to 
                             replace initialized detection queries at t > 0 timesteps with valid track queries
                             (track queries with class scores greater than some threshold)
 
         Returns
         --------------------------------
-        :output: (N, max_objs, embed_dim) batch of output context query for each segmented item
+        :output: (N, max_detections, embed_dim) batch of output context query for each segmented item
                 (including invalid detections)
 
-        :detections: (N, max_objs, det_params) batch of detection for multiple identified items
+        :detections: (N, max_detections, det_params) batch of detection for multiple identified items
 
-        :track_queries_mask: (N, max_objs), newly computed track query masks pertaining to 
+        :track_queries_mask: (N, max_detections), newly computed track query masks pertaining to 
                                 valid and invalid-detections
 
-        :layers_results: (num_layers, N, max_objs, embed_dim), output context query of each layer
+        :layers_results: (num_layers, N, max_detections, embed_dim), output context query of each layer
         """
         is_track_queries      = track_queries is not None
         is_track_queries_mask = track_queries_mask is not None
@@ -184,7 +185,7 @@ class TrackFormer(nn.Module):
             batch_size=batch_size, 
             device=bev_features.device, 
             normalize=False, 
-            n_sample=self.max_objs
+            n_sample=self.max_detections
         )
         ref_points        = ref_points.unsqueeze(dim=-2)
         detection_queries = self.detection_pos_emb()
@@ -202,7 +203,7 @@ class TrackFormer(nn.Module):
         # (MLP), the classification score is above a certain stipulated threshold (hyperparameter). 
         # If there are new detections after (t = 0), then the remaining initialized detection queries (not already
         # replaced by track queries) will be responsible for detecting those, hence it is crucial to ensure that
-        # value for `max_objs` should be sufficient enough to accomodate for both the detection queries and the 
+        # value for `max_detections` should be sufficient enough to accomodate for both the detection queries and the 
         # track queries.
         if track_queries is not None:
             assert track_queries.shape[-1] == self.embed_dim

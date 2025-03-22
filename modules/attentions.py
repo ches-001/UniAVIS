@@ -15,7 +15,7 @@ class DotProductAttention(nn.Module):
             K: torch.Tensor,
             V: torch.Tensor,
             padding_mask: Optional[torch.BoolTensor]=None,
-            attention_mask: Optional[torch.BoolTensor]=None,
+            attention_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
         """
         Input
@@ -28,20 +28,13 @@ class DotProductAttention(nn.Module):
 
         :padding_mask: (N, ..., query_len), padding mask (0 if padding, else 1)
 
-        :attention_mask: (N, ..., query_len, query_len), attention mask (0 if not attended to, else 1)
+        :attention_mask: (N, ..., query_len, key_len), attention mask (0 if not attended to, else 1)
 
         Returns
         --------------------------------
         :output: (N, query_len, embed_dim)
         """
         assert Q.ndim == K.ndim and K.ndim == V.ndim
-        assert Q.ndim == 3 or Q.ndim == 4
-
-        if padding_mask is not None:
-            assert padding_mask.shape == Q.shape[:-1]
-
-        if attention_mask is not None:
-            assert attention_mask.shape == Q.shape[:-1]
 
         K_dims = list(range(0, K.ndim))
         K_T    = K.permute(*(K_dims[:-2] + [K_dims[-1], K_dims[-2]]))
@@ -49,11 +42,15 @@ class DotProductAttention(nn.Module):
 
         if torch.is_tensor(padding_mask):
             padding_mask = padding_mask[..., None]
-            attn         = attn.masked_fill(padding_mask==0, -torch.inf)
+            assert attn.ndim == padding_mask.ndim
+            attn = attn.masked_fill(padding_mask, -torch.inf)
             
         if torch.is_tensor(attention_mask):
-            attention_mask = attention_mask[..., None]
-            attn           = attn.masked_fill(attention_mask==0, -torch.inf)
+            assert attn.ndim == attention_mask.ndim
+            if isinstance(attention_mask, torch.BoolTensor):
+                attn = attn.masked_fill(attention_mask, -torch.inf)
+            else:
+                attn = attn * attention_mask
         
         attn        = F.softmax(attn, dim=-1)
         output      = torch.matmul(attn, V)
@@ -83,7 +80,7 @@ class MultiHeadedAttention(nn.Module):
                 K: torch.Tensor, 
                 V: torch.Tensor,
                 padding_mask: Optional[torch.BoolTensor]=None,
-                attention_mask: Optional[torch.BoolTensor]=None,
+                attention_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
 
         """
@@ -97,16 +94,16 @@ class MultiHeadedAttention(nn.Module):
 
         :padding_mask: (N, query_len), padding mask (0 if padding, else 1)
 
-        :attention_mask: (N, query_len, query_len), attention mask (0 if not attended to, else 1)
+        :attention_mask: (N, query_len, key_len), attention mask (0 if not attended to, else 1)
 
         Returns
         --------------------------------
         :output: (N, query_len, embed_dim)
         """
         
-        assert Q.shape[-1] % self.num_heads == 0, f"vector dimension of Q must be divisible by {self.num_heads}"
-        assert K.shape[-1] % self.num_heads == 0, f"vector dimension of K must be divisible by {self.num_heads}"
-        assert V.shape[-1] % self.num_heads == 0, f"vector dimension of V must be divisible by {self.num_heads}"
+        assert Q.shape[-1] % self.num_heads == 0
+        assert K.shape[-1] % self.num_heads == 0
+        assert V.shape[-1] % self.num_heads == 0
         
         N, _, _ = Q.shape
         
@@ -114,13 +111,13 @@ class MultiHeadedAttention(nn.Module):
         K = self.K_fc(K)
         V = self.V_fc(V)
         
-        Q = Q.reshape(N, Q.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        K = K.reshape(N, K.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        V = V.reshape(N, V.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        Q = Q.reshape(N, Q.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
+        K = K.reshape(N, K.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
+        V = V.reshape(N, V.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
         
         if padding_mask is not None:
-            padding_mask   = padding_mask[:, None, None]
-        
+            padding_mask   = padding_mask[:, None]
+
         if attention_mask is not None:
             attention_mask = attention_mask[:, None]
 
@@ -174,7 +171,7 @@ class DeformableAttention(nn.Module):
             ref_points: torch.Tensor,
             value: torch.Tensor, 
             value_spatial_shapes: torch.LongTensor,
-            attention_mask: Optional[torch.BoolTensor]=None,
+            attention_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
 
         """
@@ -248,7 +245,7 @@ class DeformableAttention(nn.Module):
             dtype=torch.int64, 
             device=queries.device
         ).cumsum(dim=-1)
-    
+        
         for (lvl, lvl_start) in enumerate(value_spatial_indexes[:-1]):
             level_shape = value_spatial_shapes[lvl]
             sample_loc  = sample_locs[:, lvl, ...]
@@ -341,7 +338,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
             ref_points: torch.Tensor,
             value: torch.Tensor, 
             value_spatial_shapes: torch.LongTensor,
-            attention_mask: Optional[torch.BoolTensor]=None,
+            attention_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
         """
         Input

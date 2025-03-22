@@ -1,28 +1,8 @@
 import torch
 import torch.nn as nn
 from .trackformer import TrackFormer
-from .common import ConvBNorm, DetectionHead
+from .common import ProtoSegModule, DetectionHead
 from typing import *
-
-class ProtoSegModule(nn.Module):
-    def __init__(
-            self, 
-            in_channels: int, 
-            out_channels: int=32, 
-            c_h: int=256, 
-        ):
-        super(ProtoSegModule, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.conv1 = ConvBNorm(self.in_channels, c_h, kernel_size=3)
-        self.conv2 = ConvBNorm(c_h, c_h, kernel_size=3)
-        self.conv3 = ConvBNorm(c_h, self.out_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.conv1(x)
-        out = self.conv2(out)
-        out = self.conv3(out)
-        return out
 
 
 class MapFormer(TrackFormer):
@@ -47,7 +27,7 @@ class MapFormer(TrackFormer):
 
         self.detection_module = DetectionHead(
             embed_dim=self.embed_dim, 
-            num_obj_class=self.num_obj_classes, 
+            num_classes=self.num_classes, 
             det_3d=self.det_3d,
             num_seg_coefs=self.num_seg_coeffs
         )
@@ -64,25 +44,26 @@ class MapFormer(TrackFormer):
         --------------------------------
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
-        :track_queries: (N, max_objs, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
+        :track_queries: (N, max_detections, embed_dim), embedding output of TrackFormer decoder at previous 
+                        timestep (t-1)
 
-        :track_queries_mask: (N, max_objs) or (N, max_objs, 1), mask of valid track queries. This will be used to 
-                            replace initialized detection queries at t > 0 timesteps with valid track queries
-                            (track queries with class scores greater than some threshold)
+        :track_queries_mask: (N, max_detections) or (N, max_detections, 1), mask of valid track queries. This 
+                            will be used to replace initialized detection queries at t > 0 timesteps with valid
+                            track queries (track queries with class scores greater than some threshold)
 
         Returns
         --------------------------------
-        :output: (N, max_objs, embed_dim) batch of output context query for each segmented item
+        :output: (N, max_detections, embed_dim) batch of output context query for each segmented item
                     (including invalid detections)
 
-        :detections: (N, max_objs, det_params) batch of detection for multiple identified items
+        :detections: (N, max_detections, det_params) batch of detection for multiple identified items
 
-        :masks: (N, max_objs, H_bev, W_bev), batch of multi-item segmentations
+        :masks: (N, max_detections, H_bev, W_bev), batch of multi-item segmentations
 
-        :track_queries_mask: (N, max_objs), newly computed track query masks pertaining to 
+        :track_queries_mask: (N, max_detections), newly computed track query masks pertaining to 
                                 valid and invalid-detections
 
-        :layers_results: (num_layers, N, max_objs, embed_dim), output context query of each layer
+        :layers_results: (num_layers, N, max_detections, embed_dim), output context query of each layer
         """
         batch_size = bev_features.shape[0]
 

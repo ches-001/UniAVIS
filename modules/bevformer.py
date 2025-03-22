@@ -53,7 +53,7 @@ class BEVFormerEncoderLayer(nn.Module):
         )
         self.add_norm2          = AddNorm(self.embed_dim)
 
-        self.feedforward_module = nn.Sequential(
+        self.mlp                = nn.Sequential(
             nn.Linear(self.embed_dim, self.dim_feedforward),
             nn.ReLU(),
             nn.Linear(self.dim_feedforward, self.embed_dim),
@@ -122,7 +122,7 @@ class BEVFormerEncoderLayer(nn.Module):
         )
 
         out4 = self.add_norm2(out3, out2)
-        out5 = self.feedforward_module(out4)
+        out5 = self.mlp(out4)
         out6 = self.add_norm3(out5, out4)
         return out6
 

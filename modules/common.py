@@ -1,5 +1,7 @@
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import *
 
 class ConvBNorm(nn.Module):
@@ -10,7 +12,7 @@ class ConvBNorm(nn.Module):
             kernel_size: Union[int, Tuple[int, int]], 
             stride: Union[int, Tuple[int, int]]=1, 
             padding: Optional[Union[int, Tuple[int, int]]]=None,
-            activation: Optional[Type]=nn.SiLU,
+            activation: Optional[Type]=nn.ReLU,
             bias: bool=True,
             no_batchnorm: bool=False,
             batchnorm_first: bool=True
@@ -46,7 +48,46 @@ class ConvBNorm(nn.Module):
             x = self.activation(x)
             x = self.norm(x)
         return x
+    
+class ConvTransposeBNorm(nn.Module):
+    def __init__(
+            self, 
+            in_channels: int, 
+            out_channels: int, 
+            kernel_size: Union[int, Tuple[int, int]], 
+            stride: Union[int, Tuple[int, int]]=1, 
+            padding: Optional[Union[int, Tuple[int, int]]]=None,
+            activation: Optional[Type]=nn.ReLU,
+            bias: bool=True,
+            no_batchnorm: bool=False,
+            batchnorm_first: bool=True
+        ):
+        super(ConvTransposeBNorm, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        padding = padding or 0
+        self._batchnorm_first = batchnorm_first
 
+        self.conv_transpose = nn.ConvTranspose2d(
+            in_channels, 
+            out_channels, 
+            kernel_size, 
+            stride=stride, 
+            padding=padding, 
+            bias=bias
+        )
+        self.norm = nn.BatchNorm2d(out_channels) if (not no_batchnorm) else nn.Identity()
+        self.activation = activation() if (activation is not None) else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv_transpose(x)
+        if self._batchnorm_first:
+            x = self.norm(x)
+            x = self.activation(x)
+        else:
+            x = self.activation(x)
+            x = self.norm(x)
+        return x
 
 class AddNorm(nn.Module):
     def __init__(self, input_dim: int, **kwargs):
@@ -213,13 +254,13 @@ class SpatialSinusoidalPosEmbedding(nn.Module):
 class DetectionHead(nn.Module):
     def __init__(
             self, embed_dim: int, 
-            num_obj_class: int, 
+            num_classes: int, 
             det_3d: bool=True, 
             num_seg_coefs: Optional[int]=None
         ):
         super(DetectionHead, self).__init__()
         self.embed_dim       = embed_dim
-        self.num_obj_class   = num_obj_class
+        self.num_classes     = num_classes
         self.det_3d          = det_3d
         self.num_seg_coefs   = num_seg_coefs
 
@@ -229,7 +270,7 @@ class DetectionHead(nn.Module):
         )
         self.obj_module            = nn.Linear(self.embed_dim, 1)
         self.loc_module            = nn.Linear(self.embed_dim, 8 if self.det_3d else 4)
-        self.classification_module = nn.Linear(self.embed_dim, self.num_obj_class)
+        self.classification_module = nn.Linear(self.embed_dim, self.num_classes)
         if self.num_seg_coefs:
             self.seg_coef_module = nn.Sequential(
                 nn.Linear(self.embed_dim, num_seg_coefs),
@@ -256,3 +297,115 @@ class DetectionHead(nn.Module):
             seg_coefs = self.seg_coef_module(out)
             output    = torch.concat([output, seg_coefs], dim=-1)
         return output
+    
+
+class ProtoSegModule(nn.Module):
+    def __init__(
+            self, 
+            in_channels: int, 
+            out_channels: int=32, 
+            c_h: int=256, 
+        ):
+        super(ProtoSegModule, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.conv1 = ConvBNorm(self.in_channels, c_h, kernel_size=3)
+        self.conv2 = ConvBNorm(c_h, c_h, kernel_size=3)
+        self.conv3 = ConvBNorm(c_h, self.out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out = self.conv3(out)
+        return out
+
+
+class TemporalSpecificMLP(nn.Module):
+    def __init__(
+            self, 
+            in_features: int, 
+            out_features: int, 
+            num_timesteps: int, 
+            hidden_dim: int=512,
+            num_layers: int=2,
+        ):
+        super(TemporalSpecificMLP, self).__init__()
+
+        assert num_layers > 0
+        assert in_features > 0
+        assert out_features > 0
+
+        self.in_features   = in_features
+        self.out_features  = out_features
+        self.num_timesteps = num_timesteps
+        self.hidden_dim    = hidden_dim
+        self.num_layers    = num_layers
+        self._num_hidden   = max(0, self.num_layers - 2)
+
+        if num_layers == 1:
+            self.in_weight        = nn.Parameter(
+                torch.empty((self.num_timesteps, self.out_features, self.in_features))
+            )
+            self.in_bias          = nn.Parameter(torch.empty(self.num_timesteps, self.out_features))
+            self.n_hidden_weights = None
+            self.n_hidden_biases  = None
+            self.out_weight       = None
+            self.out_bias         = None
+
+        else:
+            self.in_weight = nn.Parameter(
+                torch.empty((self.num_timesteps, self.hidden_dim, self.in_features))
+            )
+            self.in_bias   = nn.Parameter(torch.empty(self.num_timesteps, self.hidden_dim))
+
+            if self._num_hidden > 0:
+                self.n_hidden_weights = nn.Parameter(
+                    torch.empty((self._num_hidden, self.num_timesteps, self.hidden_dim, self.hidden_dim))
+                )
+                self.n_hidden_biases  = nn.Parameter(
+                    torch.empty(self._num_hidden, self.num_timesteps, self.hidden_dim)
+                )
+            else:
+                self.n_hidden_weights = None
+                self.n_hidden_biases  = None
+            
+            self.out_weight = nn.Parameter(
+                torch.empty((self.num_timesteps, self.out_features, self.hidden_dim))
+            )
+            self.out_bias   = nn.Parameter(
+                torch.empty(self.num_timesteps, self.out_features)
+            )
+
+        self.reset_parameters()
+
+    def _reset_bias(self, weight: nn.Parameter, bias: nn.Parameter):
+        if weight is None or bias is None:
+            return
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(weight)
+        bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+        nn.init.uniform_(bias, -bound, bound)
+
+    def reset_parameters(self):
+        params = [
+            (self.in_weight, self.in_bias), 
+            (self.n_hidden_weights, self.n_hidden_biases), 
+            (self.out_weight, self.out_bias)
+        ]
+        for (weight, bias) in params:
+            if weight is None or bias is None:
+                continue
+            nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
+            self._reset_bias(weight, bias)
+
+    def forward(self, x: torch.Tensor, tidx: int) -> torch.Tensor:
+        out = F.linear(x, weight=self.in_weight[tidx], bias=self.in_bias[tidx])
+        if self._num_hidden > 0:
+            for lidx in range(0, self._num_hidden):
+                out = F.relu(out)
+                out = F.linear(
+                    out, weight=self.n_hidden_weights[lidx, tidx], bias=self.n_hidden_biases[lidx, tidx]
+                )
+        if self.num_layers > 1:
+            out = F.relu(out)
+            out = F.linear(out, weight=self.out_weight[tidx], bias=self.out_bias[tidx])
+        return out
