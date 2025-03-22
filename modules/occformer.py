@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .common import AddNorm, ConvBNorm, ConvTransposeBNorm, PosEmbedding1D, TemporalSpecificMLP
-from .attentions import MultiHeadedAttention, DeformableAttention
+from .attentions import MultiHeadedAttention
 from typing import *
 
 
@@ -237,6 +237,11 @@ class OccFormer(nn.Module):
             agent_features  = self.temporal_mlp(sparse_features, tidx)
             mask_features   = self.mask_features_mlp(agent_features)
 
+            # each layer corresponds to a timestep, and for each timestep, the estimated occupancy of that and
+            # the previous timsteps are accumulated into oen final accumulated agent future occupancy map, 
+            # ideally, the last estimated occupancy is the most complete occupancy, however other occupancies
+            # at prior timesteps are not useless, they still need to be compared with their corresponding groud
+            # truths for the sake of coherence and consistency.
             dense_features = self.decoder_modules[tidx](
                 dense_features=dense_features,
                 agent_features=agent_features,
