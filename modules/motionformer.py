@@ -101,9 +101,9 @@ class MotionFormer(nn.Module):
             self,
             num_heads: int, 
             embed_dim: int,
-            num_layers: int,
             max_num_agents: int,
             max_num_maps: int,
+            num_layers: int=3,
             num_modes: int=6,
             num_ref_points: int=4,
             pred_horizon: int=12,
@@ -119,9 +119,9 @@ class MotionFormer(nn.Module):
 
         self.num_heads          = num_heads
         self.embed_dim          = embed_dim
-        self.num_layers         = num_layers
         self.max_num_agents     = max_num_agents
         self.max_num_maps       = max_num_maps
+        self.num_layers         = num_layers
         self.num_modes          = num_modes
         self.num_ref_points     = num_ref_points
         self.pred_horizon       = pred_horizon
