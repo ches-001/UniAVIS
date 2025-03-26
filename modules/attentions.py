@@ -43,12 +43,12 @@ class DotProductAttention(nn.Module):
         if torch.is_tensor(padding_mask):
             padding_mask = padding_mask[..., None]
             assert attn.ndim == padding_mask.ndim
-            attn = attn.masked_fill(padding_mask, -torch.inf)
+            attn = attn.masked_fill(~padding_mask, -torch.inf)
             
         if torch.is_tensor(attention_mask):
             assert attn.ndim == attention_mask.ndim
             if isinstance(attention_mask, torch.BoolTensor):
-                attn = attn.masked_fill(attention_mask, -torch.inf)
+                attn = attn.masked_fill(~attention_mask, -torch.inf)
             else:
                 attn = attn * attention_mask
         
@@ -172,6 +172,7 @@ class DeformableAttention(nn.Module):
             value: torch.Tensor, 
             value_spatial_shapes: torch.LongTensor,
             attention_mask: Optional[torch.Tensor]=None,
+            normalize_ref_points: bool=True,
         ) -> torch.Tensor:
 
         """
@@ -188,6 +189,9 @@ class DeformableAttention(nn.Module):
         :value_spatial_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
         :attention_mask: (N, query_len, L), attention mask (0 if to ignore, else 1)
+
+        :normalize_ref_points: bool, normalize reference points to fall within range [-1, 1], if set to False, ensure that
+                               reference points are already normalized
 
         Returns
         --------------------------------
@@ -221,14 +225,14 @@ class DeformableAttention(nn.Module):
 
         if attention_mask is not None:
             attention_mask = attention_mask[:, :, None, :, None]
-            attn = attn.masked_fill(attention_mask, value=0)
+            attn = attn.masked_fill(~attention_mask, value=0)
             
         # attn shape: (N, num_heads, num_fmap_levels, query_len, num_ref_points)
         attn        = attn.permute(0, 2, 3, 1, 4).contiguous()
         
-        # normalize ref_points to fall within range [-1, 1]
-        max_xy      = torch.stack([value_spatial_shapes[..., 1], value_spatial_shapes[..., 0]], dim=-1) - 1
-        ref_points  = 2 * (ref_points / max_xy[None, None, ...]) - 1
+        if normalize_ref_points:
+            max_xy      = torch.stack([value_spatial_shapes[..., 1], value_spatial_shapes[..., 0]], dim=-1) - 1
+            ref_points  = 2 * (ref_points / max_xy[None, None, ...]) - 1
 
         sample_locs = (ref_points[:, :, None, :, None, :] + offsets).clamp(min=-1, max=1)
 
@@ -339,6 +343,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
             value: torch.Tensor, 
             value_spatial_shapes: torch.LongTensor,
             attention_mask: Optional[torch.Tensor]=None,
+            normalize_ref_points: bool=True
         ) -> torch.Tensor:
         """
         Input
@@ -355,6 +360,9 @@ class MultiView3DDeformableAttention(DeformableAttention):
         :value_spatial_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
         :attention_mask: (N, query_len, num_views, L, z_refs), attention mask (0 if to ignore, else 1)
+
+        :normalize_ref_points: bool, normalize reference points to fall within range [-1, 1], if set to False, ensure that
+                               reference points are already normalized
 
         Returns
         --------------------------------
@@ -414,13 +422,14 @@ class MultiView3DDeformableAttention(DeformableAttention):
         )
         if attention_mask is not None:
             attention_mask = attention_mask[:, :, None, :, :, None, :]
-            attn = attn.masked_fill(attention_mask, value=0)
+            attn = attn.masked_fill(~attention_mask, value=0)
 
         # attn shape: (batch_size, num_heads, num_views, num_fmap_levels, query_len, num_ref_points, num_z_ref_points)
         attn        = attn.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
         
-        max_xy     = torch.stack([value_spatial_shapes[..., 1], value_spatial_shapes[..., 0]], dim=-1) - 1
-        ref_points = 2 * (ref_points / max_xy[None, None, None, :, None, :]) - 1
+        if normalize_ref_points:
+            max_xy     = torch.stack([value_spatial_shapes[..., 1], value_spatial_shapes[..., 0]], dim=-1) - 1
+            ref_points = 2 * (ref_points / max_xy[None, None, None, :, None, :]) - 1
 
         # sample_locs shape: 
         #   (batch_size, num_heads, num_views, num_fmap_levels, query_len, num_ref_points, num_z_ref_points, 2)

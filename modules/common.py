@@ -187,11 +187,15 @@ class PosEmbedding2D(nn.Module):
             self.register_buffer("x_pos_embs", x_pos_embs)
             self.register_buffer("y_pos_embs", y_pos_embs)
 
-    def forward(self) -> torch.Tensor:
+    def forward(self, flatten: bool=False) -> torch.Tensor:
         """
+        Input
+        --------------------------------
+        :flatten: if True, reshape embeddings from shape (1, num_embed, H, W) to (1, H * W, num_embed)
+
         Returns
         --------------------------------
-        :output: (1, num_embed, H, W), (where: H = y_dim, X = x_dim)
+        :output: (1, num_embed, H, W) or (1, H * W, num_embed), (where: H = y_dim, X = x_dim)
         """
         if self.learnable:
             device        = self.x_pos_emb_module.weight.device
@@ -207,6 +211,8 @@ class PosEmbedding2D(nn.Module):
         y_pos_embs    = y_pos_embs.permute(0, 2, 1)[:, :, :, None]
         embs          = x_pos_embs + y_pos_embs    
 
+        if flatten:
+            embs = embs.permute(0, 2, 3, 1).contiguous().reshape(1, -1, embs.shape[1])
         return embs
     
 

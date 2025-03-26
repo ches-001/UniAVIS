@@ -132,18 +132,18 @@ class MotionFormer(nn.Module):
         self.bev_feature_shape  = bev_feature_shape
         self.grid_xy_res        = grid_xy_res
 
-        self.spatial_pos_emb    = SpatialSinusoidalPosEmbedding(self.embed_dim)
-        self.agent_query_emb    = PosEmbedding1D(
+        self.spatial_pos_emb     = SpatialSinusoidalPosEmbedding(self.embed_dim)
+        self.agent_query_pos_emb = PosEmbedding1D(
             self.max_num_agents, 
             self.embed_dim, 
-            learnable=False
+            learnable=self.learnable_pe
         )
-        self.map_query_emb      = PosEmbedding1D(
+        self.map_query_pos_emb   = PosEmbedding1D(
             self.max_num_maps, 
             self.embed_dim, 
-            learnable=False
+            learnable=self.learnable_pe
         )
-        self.ctx_query_emb      = PosEmbedding1D(
+        self.ctx_query_emb       = PosEmbedding1D(
             self.max_num_agents * self.num_modes, 
             self.embed_dim, 
             learnable=self.learnable_pe
@@ -215,7 +215,7 @@ class MotionFormer(nn.Module):
 
         Returns
         --------------------------------
-        :ctx_queries: (N, max_num_agents, k, embed_dim), MotionFormer final context query output
+        :motion_queries: (N, max_num_agents, k, embed_dim), MotionFormer final context query output
 
         :mode_trajectories: (N, max_num_agents, k, T, 5), batch of estimated k-mode T-long trajectories for each agent
                             (k = number of modes, T = length of trajectory). 
@@ -227,8 +227,8 @@ class MotionFormer(nn.Module):
         k, *_                = agent_anchors.shape
         _, max_num_agents, _ = agent_queries.shape
         device               = bev_features.device
-        agent_queries        = agent_queries + self.agent_query_emb()
-        map_queries          = map_queries + self.map_query_emb()
+        agent_queries        = agent_queries + self.agent_query_pos_emb()
+        map_queries          = map_queries + self.map_query_pos_emb()
         
         # scene level anchors are points global coordinates that are not specific to any agent level coordinates
         # since we wish to generate scene level anchors for each agent level anchor, we generate them like so:
@@ -299,6 +299,11 @@ class MotionFormer(nn.Module):
             mode_trajectories = self.trajectory_mlp(ctx_queries)
             mode_scores       = self.mode_score_mlp(ctx_queries)
             mode_trajectories = mode_trajectories.reshape(batch_size, max_num_agents, k, self.pred_horizon, 5)
+
+            # we use cumsum method here because the agent estimates velocities, given that velocity is the rate of
+            # change of distance overtime, a cummulative sum of velocities will yield an actual distance trajectory
+            xy_traj           = mode_trajectories[..., :2].cumsum(dim=3)
+            mode_trajectories = torch.concat([xy_traj, mode_trajectories[..., 2:]], dim=-1)
             mode_scores       = mode_scores.reshape(batch_size, max_num_agents, k)
 
             # update positional embedding based on predicted goal positions for each agent.

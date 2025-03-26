@@ -36,45 +36,54 @@ class MapFormer(TrackFormer):
             self, 
             bev_features: torch.Tensor, 
             track_queries: Optional[torch.Tensor]=None,
-            track_queries_mask: Optional[torch.Tensor]=None,
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor]:
+            track_queries_mask: Optional[torch.BoolTensor]=None,
+        ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
 
         """
         Input
         --------------------------------
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
-        :track_queries: (N, max_detections, embed_dim), embedding output of TrackFormer decoder at previous 
+        :track_queries: (N, num_queries, embed_dim), embedding output of TrackFormer or MapFormer decoder at previous 
                         timestep (t-1)
 
-        :track_queries_mask: (N, max_detections) or (N, max_detections, 1), mask of valid track queries. This 
-                            will be used to replace initialized detection queries at t > 0 timesteps with valid
-                            track queries (track queries with class scores greater than some threshold)
+        :track_queries_mask: (N, num_queries), boolean mask, indicating the tracks with valid and invalid detections
+                            NOTE: Detection is invalid if score <= track_threshold (1 if valid, else 0)
 
         Returns
         --------------------------------
-        :output: (N, max_detections, embed_dim) batch of output context query for each segmented item
-                    (including invalid detections)
+        if training:
+            :map_queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
+                        (including invalid detections)
 
-        :detections: (N, max_detections, det_params) batch of detection for multiple identified items
+            :layers_detections: (num_layers, N, num_queries, embed_dim), output context query of each layer
 
-        :masks: (N, max_detections, H_bev, W_bev), batch of multi-item segmentations
+            :layer_seg_masks: (num_layers, N, num_queries, H_bev, W_bev), batch of multi-item segmentations of each layer
 
-        :track_queries_mask: (N, max_detections), newly computed track query masks pertaining to 
-                                valid and invalid-detections
+        else:
+            :detections: (N, num_queries, embed_dim), output context query of laast layer
 
-        :layers_results: (num_layers, N, max_detections, embed_dim), output context query of each layer
+            :layer_seg_masks: (num_layers, N, num_queries, H_bev, W_bev), batch of multi-item segmentations of last layer          
         """
         batch_size = bev_features.shape[0]
 
-        output, detections, track_queries_mask, layers_results = super(MapFormer, self).forward(
-            bev_features, track_queries, track_queries_mask
+        protos = self.proto_seg_module(
+            bev_features.permute(0, 2, 1).contiguous().reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
         )
 
-        coef_dim_trunc = detections.shape[-1] - self.num_seg_coeffs
-        mask_coefs     = detections[..., coef_dim_trunc:]
-        detections     = detections[..., :coef_dim_trunc]
-        bev_features   = bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
-        protos         = self.proto_seg_module(bev_features)
-        masks          = torch.einsum("nast,nshw->nahw", mask_coefs[..., None], protos)
-        return output, detections, masks, track_queries_mask, layers_results
+        if self.training:
+            output, layers_detections = super(MapFormer, self).forward(bev_features, track_queries, track_queries_mask)
+
+            coef_dim_trunc    = layers_detections.shape[-1] - self.num_seg_coeffs
+            layers_mask_coefs = layers_detections[..., coef_dim_trunc:]
+            layers_detections = layers_detections[..., :coef_dim_trunc]
+            layer_seg_masks   = torch.einsum("lnast,tnshw->lnahw", layers_mask_coefs[..., None], protos[None])
+            return output, layers_detections, layer_seg_masks
+        
+        else:
+            detections = super(MapFormer, self).forward(bev_features, track_queries, track_queries_mask)
+            coef_dim_trunc = detections.shape[-1] - self.num_seg_coeffs
+            mask_coefs     = detections[..., coef_dim_trunc:]
+            detections     = detections[..., :coef_dim_trunc]
+            seg_masks      = torch.einsum("nast,nshw->nahw", mask_coefs[..., None], protos)
+            return detections, seg_masks

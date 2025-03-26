@@ -105,7 +105,7 @@ class OccFormer(nn.Module):
             num_tmlp_layers: int=2,
             bev_feature_shape: Tuple[int, int]=(200, 200),
             bev_downsmaple_scale: int=4,
-            op_attn_scale       : int=2
+            op_attn_scale : int=2
         ):
 
         super(OccFormer, self).__init__()
@@ -189,8 +189,7 @@ class OccFormer(nn.Module):
             bev_features: torch.Tensor, 
             track_queries: torch.Tensor, 
             motion_queries: torch.Tensor,
-            last_t: bool=False
-        ):
+        ) -> torch.Tensor:
         """
         Input
         --------------------------------
@@ -199,12 +198,6 @@ class OccFormer(nn.Module):
         :track_queries: (N, max_num_agents, embed_dim) Agent track queries from the TrackFormer
 
         :motion_queries: (N, max_num_agents, k, embed_dim), Motion queries from the MotionFormer
-
-        :last_t: a boolean if set to True, return only the occupancies for the last timestep. This is more
-                efficient especially during inference, because no extra computation is required to generate
-                occupancies for each timestep. You might want to set this to False during training, and True
-                during inference, because during training, you will want to ensure coherence and accuracy
-                or prediction across each and every timesteps
 
         Returns
         --------------------------------
@@ -248,14 +241,14 @@ class OccFormer(nn.Module):
                 mask_features=mask_features,
             )
             
-            if not last_t or (last_t and tidx == self.num_layers - 1):
+            if self.training or (not self.training and tidx == self.num_layers - 1):
                 occ_features = self.occ_features_mlp(mask_features)
                 proba_map    = self.conv_transpose(dense_features)
                 proba_map    = proba_map.permute(0, 2, 1, 3).contiguous().reshape(batch_size, -1, self.embed_dim)
                 occupancy    = torch.matmul(occ_features, proba_map.permute(0, 2, 1).contiguous())
                 occupancy    = occupancy.permute(0, 2, 1).contiguous()
                 occupancy    = occupancy.reshape(batch_size, self.max_num_agents, *self.bev_feature_shape)
-                if not last_t:
+                if self.training:
                     occupancies.append(occupancy)
                 else:
                     return occupancy

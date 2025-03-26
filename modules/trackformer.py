@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .attentions import MultiHeadedAttention, DeformableAttention
 from .common import AddNorm, PosEmbedding1D, DetectionHead
 from typing import *
@@ -54,31 +55,61 @@ class TrackFormerDecoderLayer(nn.Module):
             queries: torch.Tensor,
             bev_features: torch.Tensor,
             ref_points: torch.Tensor, 
+            og_det_queries: torch.Tensor,
+            padding_mask: torch.Tensor,
         ) -> torch.Tensor:
         """
         Input
         --------------------------------
-        :queries: (N, num_queries, det_embeds) list of tensors of shape
+
+        :queries: (N, num_queries, det_embeds) input queries (num_queries = num_detections + num_track)
 
         :bev_features: (N, W_bev * H_bev, (C_bev or embed_dim))
 
         :ref_points: (N, num_queries, 1, 2), reference points for the deformable attention
 
+        :og_det_queries: (N, num_detections, det_embeds), original object / detection queries
+
+        :padding_mask: (N, num_queries), padding / attention mask for queries (0 if to ignore else 1)
+
         Returns
         --------------------------------
-        :output: (N, num_queries, embed_dim), output queries to be fed into the next layer
+        :track_queries: (N, num_queries, embed_dim), output queries to be fed into the next layer
         """
         H_bev, W_bev = self.bev_feature_shape
         assert bev_features.shape[1] == H_bev * W_bev
         assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
 
-        out1              = self.self_attention(queries, queries, queries)
-        out2              = self.addnorm1(queries, out1)
         bev_spatial_shape = torch.LongTensor([[H_bev, W_bev]], device=queries.device)
-        out3              = self.deform_attention(out2, ref_points, bev_features, bev_spatial_shape)
-        out4              = self.addnorm2(out2, out3)
-        out5              = self.mlp(out4)
-        out6              = self.addnorm3(out4, out5)
+        num_queries       = queries.shape[1]
+        num_det           = og_det_queries.shape[1]
+        num_tracks        = num_queries - num_det
+        q_and_k           = queries
+        
+        # i could have easily done queries[:, o_queries.shape[1]: :] += o_queries or so, but inplace operations
+        # on tensors with gradient history screw up gradients and causes inplace errors
+        if num_tracks > 0:
+            q_and_k = [q_and_k[:, :num_tracks, :], q_and_k[:, num_tracks:, :] + og_det_queries]
+            q_and_k = torch.concat(q_and_k, dim=1)
+        else:
+            q_and_k = q_and_k + og_det_queries
+
+        out1     = self.self_attention(q_and_k, q_and_k, queries, padding_mask=padding_mask)
+        out2     = self.addnorm1(queries, out1)
+        aug_out2 = out2
+
+        if num_tracks > 0:
+            aug_out2 = [out2[:, :num_tracks, :], out2[:, num_tracks:, :] + og_det_queries]
+            aug_out2 = torch.concat(aug_out2, dim=1)
+        else:
+            aug_out2 = aug_out2 + og_det_queries
+
+        out3 = self.deform_attention(
+            aug_out2, ref_points, bev_features, bev_spatial_shape, attention_mask=padding_mask[..., None]
+        )
+        out4 = self.addnorm2(out2, out3)
+        out5 = self.mlp(out4)
+        out6 = self.addnorm3(out4, out5)
         return out6
 
 
@@ -93,7 +124,7 @@ class TrackFormer(nn.Module):
             dim_feedforward: int=512, 
             dropout: float=0.1,
             offset_scale: float=1.0,
-            max_detections: int=100,
+            max_detections: int=900,
             learnable_pe: bool=True,
             bev_feature_shape: Tuple[int, int]=(200, 200),
             track_threshold: float=0.5,
@@ -144,91 +175,94 @@ class TrackFormer(nn.Module):
             self, 
             bev_features: torch.Tensor, 
             track_queries: Optional[torch.Tensor]=None,
-            track_queries_mask: Optional[torch.Tensor]=None,
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor]:
+            track_queries_mask: Optional[torch.BoolTensor]=None,
+        ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
 
         """
         Input
         --------------------------------
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
-        :track_queries: (N, max_detections, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
-                        NOTE: max_detections includes number of valid detections + number of invalid detections
+        :track_queries: (N, num_queries, embed_dim), embedding output of TrackFormer decoder at previous timestep (t-1)
 
-        :track_queries_mask: (N, max_detections) or (N, max_detections, 1), mask of valid track queries. This will be used to 
-                            replace initialized detection queries at t > 0 timesteps with valid track queries
-                            (track queries with class scores greater than some threshold)
+        :track_queries_mask: (N, num_queries), boolean mask, indicating the tracks with valid and invalid detections
+                            NOTE: Detection is invalid if score <= track_threshold (1 if valid, else 0)
 
         Returns
         --------------------------------
-        :output: (N, max_detections, embed_dim) batch of output context query for each segmented item
-                (including invalid detections)
+        if training:
+            :output: (N, num_queries, embed_dim) batch of output context query for each segmented item
+                    (including invalid detections). NOTE: num_queries = num_detections (max_detections) + num_track. 
+                    num_track is the number of track_queries and it is dynamic as it depends on the number of valid.
+                    detections
 
-        :detections: (N, max_detections, det_params) batch of detection for multiple identified items
+            :layers_detections: (num_layers, N, num_queries, embed_dim), output context query of each layer
 
-        :track_queries_mask: (N, max_detections), newly computed track query masks pertaining to 
-                                valid and invalid-detections
-
-        :layers_results: (num_layers, N, max_detections, embed_dim), output context query of each layer
+        else:
+            :detections: (N, num_queries, det_params) batch of detection for multiple identified items
         """
-        is_track_queries      = track_queries is not None
-        is_track_queries_mask = track_queries_mask is not None
-        assert (
-            (is_track_queries and is_track_queries_mask) 
-            or ((not is_track_queries) and (not is_track_queries))
-        )
         assert bev_features.shape[-1] == self.embed_dim
 
         batch_size        = bev_features.shape[0]
+        device            = bev_features.device
+        detection_queries = self.detection_pos_emb()
+        detection_queries = detection_queries.tile(batch_size, 1, 1)
+        padding_mask      = torch.ones(*detection_queries.shape[:-1], device=device, dtype=torch.bool)
+        
+        if track_queries is not None:
+            # if track queries are available, combine (concatenate) them with the static detection queries
+            # the detection queries are responsible for detecting new objects that enter the frame, the 
+            # track queries on the other hand are queries used to persist a detection across multiple frames
+            # for as long as said detection is alive, inotherwords, tracking. Since each sample per batch can
+            # have varying number of valid tracks, for each sample, we retrieve the valid tracks, pad it to a
+            # fixed size equivalent to the max number of valid tracks in the batch, then recompute its corresponding
+            # mask accordingly.
+            assert track_queries.shape[-1] == self.embed_dim
+            assert track_queries.shape[1] == track_queries_mask.shape[1]
+            max_num_tracks = track_queries_mask.sum(dim=1).max()
+
+            new_track_queries      = []
+            new_track_queries_mask = []
+            for i in range(0, batch_size):
+                tracks                         = track_queries[i][track_queries_mask[i]]
+                num_valid_tracks               = tracks.shape[0]
+                pad_size                       = max_num_tracks - num_valid_tracks
+                tracks                         = F.pad(tracks, pad=(0, 0, 0, pad_size), mode="constant", value=0)
+                tracks_mask                    = torch.zeros(max_num_tracks, device=device, dtype=torch.bool)
+                tracks_mask[:num_valid_tracks] = True
+                new_track_queries.append(tracks)
+                new_track_queries_mask.append(tracks_mask)
+
+            track_queries      = torch.stack(new_track_queries, dim=0)
+            track_queries_mask = torch.stack(new_track_queries_mask, dim=0)
+            queries            = torch.concat([track_queries, detection_queries], dim=1)
+            padding_mask       = torch.concat([track_queries_mask, padding_mask], dim=1)
+        else:
+            queries = detection_queries
+        
         ref_points        = DeformableAttention.generate_standard_ref_points(
-            self.bev_feature_shape, 
+            self.bev_feature_shape,
             batch_size=batch_size, 
             device=bev_features.device, 
             normalize=False, 
-            n_sample=self.max_detections
-        )
-        ref_points        = ref_points.unsqueeze(dim=-2)
-        detection_queries = self.detection_pos_emb()
-        detection_queries = detection_queries.tile(batch_size, 1, 1)
-        
-        # the idea behind this if-else statement is quite interesting, there are two kinds of queries used
-        # in this module, the detection and the track queries, the former is used for identifying new objects
-        # that just entered the scene, and the latter is for re-identifying and tracking already detected objects.
-        # For spatiotemporal input (like a sequence of frames or a video) processing, at the first timestep 
-        # (t = 0) there are no track queries, and the detection queries is required to be capable of detecting
-        # new objects in the scene, at subsequent timesteps (t > 0), the output (specfically the embedding)
-        # of the last layer of the trackformer decoder module will serve as the query for already detected objects
-        # that are to be tracked, as long as the track queries represent valid objects in the scene.
-        # Here a given track query represents a valid object if after being projected by the final detection head
-        # (MLP), the classification score is above a certain stipulated threshold (hyperparameter). 
-        # If there are new detections after (t = 0), then the remaining initialized detection queries (not already
-        # replaced by track queries) will be responsible for detecting those, hence it is crucial to ensure that
-        # value for `max_detections` should be sufficient enough to accomodate for both the detection queries and the 
-        # track queries.
-        if track_queries is not None:
-            assert track_queries.shape[-1] == self.embed_dim
-            assert (
-                track_queries_mask.ndim == 2 
-                or (track_queries_mask.ndim == 3 and track_queries_mask.shape[2] == 1)
-            )
-            if track_queries_mask.ndim == 2:
-                track_queries_mask = track_queries_mask[..., None]
-            queries = torch.where(track_queries_mask, track_queries, detection_queries)
-        else:
-            queries = detection_queries
+            n_sample=queries.shape[1]
+        ).unsqueeze(dim=-2)
 
-        output = queries
-        
-        layers_results = []
+        layers_detections = []
         for decoder_idx in range(0, len(self.decoder_modules)):
             output = self.decoder_modules[decoder_idx](
-                queries=output + queries,
+                queries=queries,
                 bev_features=bev_features,
-                ref_points=ref_points
+                ref_points=ref_points,
+                og_det_queries=detection_queries,
+                padding_mask=padding_mask
             )
-            layers_results.append(self.detection_module(output))
+            if not self.training:
+                if decoder_idx == self.num_layers - 1:
+                    return self.detection_module(output)
+            else:
+                detections = self.detection_module(output)
+                layers_detections.append(detections)
             
-        layers_results = torch.stack(layers_results, dim=0)
-        detections             = layers_results[-1]
-        track_queries_mask     = detections[..., 0] >= self.track_threshold
-        return output, detections, track_queries_mask, layers_results
+        layers_detections = torch.stack(layers_detections, dim=0)
+        return output, layers_detections
