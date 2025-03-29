@@ -265,8 +265,8 @@ class MotionFormer(nn.Module):
 
         queries               = ctx_queries + query_pos_emb
 
-        # reshape agent_goal_pos to (N, max_num_agents, 2) and create a ones tensor to set it and the next agent_goal_pos to
-        # homogeneous coordinate and tile k-times along the second axis
+        # reshape agent_goal_pos to (N, max_num_agents, 2) and create a ones tensor to set it and the next agent_goal_pos
+        # to homogeneous coordinate and tile k-times along the second axis
         agent_goal_pos        = agent_goal_pos[..., 0, :].tile(1, k, 1)
         ones                  = torch.ones(*agent_goal_pos.shape[:-1], 1, dtype=agent_anchors.dtype, device=device)
         grid_xy_res           = torch.tensor(self.grid_xy_res, device=device)
@@ -279,9 +279,9 @@ class MotionFormer(nn.Module):
             # we set the reference points for the deformable attention between the queries and the bev features to
             # scene-level goal positions predicted in the previous layer of each agent, we then convert the scene
             # level coordinates to BEV grid space coordinates. Since the reference points are computed from the goal
-            # positions (which have a shape of (N, max_num_agents, 2)), we tile the second dimension by k, ensuring that each
-            # modality has the same reference points, and to also match the referencce points to the context query
-            # which has a shape of (N, max_num_agents * k, num_embed)
+            # positions (which have a shape of (N, max_num_agents, 2)), we tile the second dimension by k, ensuring
+            # that each modality has the same reference points, and to also match the referencce points to the context
+            # query which has a shape of (N, max_num_agents * k, num_embed)
             ref_points  = torch.concat([agent_goal_pos, ones], dim=-1)
             ref_points  = torch.einsum("naii,naik->naik", proj_matrix, ref_points[..., None])
             ref_points  = ref_points[..., :2, 0][..., None, :]
