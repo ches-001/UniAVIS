@@ -191,7 +191,7 @@ class TrackFormer(nn.Module):
         Returns
         --------------------------------
         if training:
-            :output: (N, num_queries, embed_dim) batch of output context query for each segmented item
+            :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
                     (including invalid detections). NOTE: num_queries = num_detections (max_detections) + num_track. 
                     num_track is the number of track_queries and it is dynamic as it depends on the number of valid.
                     detections
@@ -250,20 +250,19 @@ class TrackFormer(nn.Module):
 
         layers_detections = []
         for decoder_idx in range(0, len(self.decoder_modules)):
-            output = self.decoder_modules[decoder_idx](
+            queries = self.decoder_modules[decoder_idx](
                 queries=queries,
                 bev_features=bev_features,
                 ref_points=ref_points,
                 og_det_queries=detection_queries,
                 padding_mask=padding_mask
             )
-            queries = output
             if not self.training:
                 if decoder_idx == self.num_layers - 1:
-                    return self.detection_module(output)
+                    return self.detection_module(queries)
             else:
-                detections = self.detection_module(output)
+                detections = self.detection_module(queries)
                 layers_detections.append(detections)
             
         layers_detections = torch.stack(layers_detections, dim=0)
-        return output, layers_detections
+        return queries, layers_detections

@@ -53,7 +53,7 @@ class MapFormer(TrackFormer):
         Returns
         --------------------------------
         if training:
-            :map_queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
+            :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
                         (including invalid detections)
 
             :layers_detections: (num_layers, N, num_queries, embed_dim), output context query of each layer
@@ -72,13 +72,13 @@ class MapFormer(TrackFormer):
         )
 
         if self.training:
-            output, layers_detections = super(MapFormer, self).forward(bev_features, track_queries, track_queries_mask)
+            queries, layers_detections = super(MapFormer, self).forward(bev_features, track_queries, track_queries_mask)
 
             coef_dim_trunc    = layers_detections.shape[-1] - self.num_seg_coeffs
             layers_mask_coefs = layers_detections[..., coef_dim_trunc:]
             layers_detections = layers_detections[..., :coef_dim_trunc]
             layer_seg_masks   = torch.einsum("lnast,tnshw->lnahw", layers_mask_coefs[..., None], protos[None])
-            return output, layers_detections, layer_seg_masks
+            return queries, layers_detections, layer_seg_masks
         
         else:
             detections = super(MapFormer, self).forward(bev_features, track_queries, track_queries_mask)
