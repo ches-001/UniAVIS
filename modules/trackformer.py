@@ -257,6 +257,7 @@ class TrackFormer(nn.Module):
                 og_det_queries=detection_queries,
                 padding_mask=padding_mask
             )
+            queries = output
             if not self.training:
                 if decoder_idx == self.num_layers - 1:
                     return self.detection_module(output)

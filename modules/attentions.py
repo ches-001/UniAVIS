@@ -677,7 +677,7 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         proj_2d = torch.einsum("vtttki,txyzij->vxyzkj", cam_proj_matrices[:, None, None, None, ...], grid_3d[None, ..., None])
         proj_2d = proj_2d[..., :2, 0]
 
-        # calculate reference points from 3D -> 2D points projections
+        # scale 2D projection points to feature map scales to make reference points
         hw_ratio   = multiscale_fmap_shapes / img_spatial_shape
         wh_ratio   = torch.stack([hw_ratio[:, 1], hw_ratio[:, 0]], dim=-1)
         ref_points = proj_2d.reshape(num_views, H_bev * W_bev, self.num_z_ref_points, 2).permute(1, 0, 2, 3)
