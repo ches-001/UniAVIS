@@ -11,10 +11,10 @@ class PillarFeatureGenerator(nn.Module):
             xyz_range: Optional[List[Tuple[float, float]]]=None,
         ):
         super(PillarFeatureGenerator, self).__init__()
-        self.pillar_wh              = pillar_wh
+        self.pillar_wh   = pillar_wh
         self.max_points  = max_points
         self.max_pillars = max_pillars
-        self.xyz_range = xyz_range or [(0.0, 70.4), (-40.0, 40.0), (-3.0, 1.0)]
+        self.xyz_range   = xyz_range or [(0.0, 70.4), (-40.0, 40.0), (-3.0, 1.0)]
 
         for r in self.xyz_range: assert r[1] > r[0]
 
