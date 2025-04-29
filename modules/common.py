@@ -324,6 +324,34 @@ class ProtoSegModule(nn.Module):
         out = self.conv2(out)
         out = self.conv3(out)
         return out
+    
+
+class SimpleMLP(nn.Module):
+    def __init__(
+            self, 
+            in_features: int, 
+            out_features, 
+            hidden_dim: int, 
+            mid_activation: Optional[nn.Module]=None, 
+            final_activation: Optional[nn.Module]=None
+        ):
+        super(SimpleMLP, self).__init__()
+
+        self.in_features      = in_features
+        self.out_features     = out_features
+        self.hidden_dim       = hidden_dim
+        self.mid_activation   = mid_activation or nn.ReLU()
+        self.final_activation = final_activation or nn.Identity()
+
+        self.fc = nn.Sequential(
+            nn.Linear(self.in_features, self.hidden_dim),
+            self.mid_activation,
+            nn.Linear(hidden_dim, out_features),
+            self.final_activation
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(x)
 
 
 class TemporalSpecificMLP(nn.Module):

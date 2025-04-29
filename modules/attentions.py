@@ -172,7 +172,7 @@ class DeformableAttention(nn.Module):
             value: torch.Tensor, 
             value_spatial_shapes: torch.LongTensor,
             attention_mask: Optional[torch.Tensor]=None,
-            normalize_ref_points: bool=True,
+            normalize_ref_points: bool=False,
         ) -> torch.Tensor:
 
         """
@@ -182,6 +182,7 @@ class DeformableAttention(nn.Module):
 
         :ref_points:     (N, query_len, L, 2) for reference points for value (multiscale feature maps) 
                          eg: [[x0, y0], ..., [xn, yn]], NOTE: this will further be normalized to be within range [-1, 1]
+                         if normalized_ref_points is True, else the function assumes the ref points are already normalized
 
         :value:          (N, \sum{i=0}^{L-1} H_i \cdot W_i, C), reshaped and concatenated (along dim=1) feature maps
                          from different pyramid levels / scales (L = num_fmap_levels)
@@ -231,7 +232,7 @@ class DeformableAttention(nn.Module):
         attn        = attn.permute(0, 2, 3, 1, 4).contiguous()
         
         if normalize_ref_points:
-            max_xy      = torch.stack([value_spatial_shapes[..., 1], value_spatial_shapes[..., 0]], dim=-1) - 1
+            max_xy      = value_spatial_shapes.flip(dim=-1) - 1
             ref_points  = 2 * (ref_points / max_xy[None, None, ...]) - 1
 
         sample_locs = (ref_points[:, :, None, :, None, :] + offsets).clamp(min=-1, max=1)
@@ -276,7 +277,7 @@ class DeformableAttention(nn.Module):
             fmap_hw: Tuple[int, int], 
             batch_size: int=1, 
             device: Union[str, int]="cpu",
-            normalize: bool=False,
+            normalize: bool=True,
             n_sample: Optional[int]=None,
         ) -> torch.Tensor:
         
@@ -343,7 +344,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
             value: torch.Tensor, 
             value_spatial_shapes: torch.LongTensor,
             attention_mask: Optional[torch.Tensor]=None,
-            normalize_ref_points: bool=True
+            normalize_ref_points: bool=False
         ) -> torch.Tensor:
         """
         Input
@@ -352,7 +353,8 @@ class MultiView3DDeformableAttention(DeformableAttention):
 
         :ref_points:    (N, query_len, num_views, L, z_refs, 2) for reference points for 
                         value (multiscale feature maps) eg: [[x0, y0], ...[xn, yn]], NOTE: this will further
-                        be normalized to be within range [-1, 1]
+                        be normalized to be within range [-1, 1] if normalized_ref_points is True, else the 
+                        function assumes the ref points are already normalized
 
         :value:         (N, num_views, \sum{i=0}^{L-1} H_i \cdot W_i, C), reshaped and concatenated (along dim=1)
                         feature maps from different pyramid levels / scales (L = num_fmap_levels)
@@ -368,7 +370,6 @@ class MultiView3DDeformableAttention(DeformableAttention):
         --------------------------------
         :output: (N, query_len, embed_dim), output BEV features / queries
         """
-
         assert value_spatial_shapes.shape[0] == self.num_fmap_levels 
         assert value.shape[1] == self.num_views
         assert ref_points.shape[1] == queries.shape[1] 
@@ -428,7 +429,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
         attn        = attn.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
         
         if normalize_ref_points:
-            max_xy     = torch.stack([value_spatial_shapes[..., 1], value_spatial_shapes[..., 0]], dim=-1) - 1
+            max_xy     = value_spatial_shapes.flip(dim=-1) - 1
             ref_points = 2 * (ref_points / max_xy[None, None, None, :, None, :]) - 1
 
         # sample_locs shape: 
@@ -529,7 +530,7 @@ class TemporalSelfAttention(DeformableAttention):
 
         # ref_points for deformable attention: (batch_size, H_bev * W_bev, 1, 2)
         ref_points  = TemporalSelfAttention.generate_standard_ref_points(
-            (H_bev, W_bev), batch_size, device=device, normalize=False
+            (H_bev, W_bev), batch_size, device=device, normalize=True
         )
         ref_points = ref_points.unsqueeze(dim=-2)
 
@@ -540,8 +541,9 @@ class TemporalSelfAttention(DeformableAttention):
             output = super(TemporalSelfAttention, self).forward(
                 bev_queries, 
                 ref_points, 
-                bev_queries, 
-                value_spatial_shapes=bev_spatial_shape, 
+                bev_queries,
+                value_spatial_shapes=bev_spatial_shape,
+                normalize_ref_points=False 
             )
             return output
 
@@ -574,7 +576,8 @@ class TemporalSelfAttention(DeformableAttention):
             bev_queries,
             ref_points,
             bev_histories,
-            value_spatial_shapes=bev_spatial_shape, 
+            value_spatial_shapes=bev_spatial_shape,
+            normalize_ref_points=False
         )
         return output
 
@@ -658,9 +661,19 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         grid_2d         = torch.stack([xgrid, ygrid], dim=-1)
         grid_2d         = grid_2d.to(dtype=torch.float32, device=device)
 
-        # map BEV grid space to real world coordinates
-        grid_2d[..., 0] = (grid_2d[..., 0] - (W_bev / 2)) * self.grid_xy_res[0]
-        grid_2d[..., 1] = (grid_2d[..., 1] - (H_bev / 2)) * self.grid_xy_res[1]
+        # map BEV grid space to real world coordinates: If the BEV grid is a (200 x 200) grid
+        # the index along both axes will range from 0 to 199, if the real world coordinates range
+        # from -51.2m to 51.2m across both x and y axes, with the grid cell space being (0.512m, 0.512m)
+        # across both axes, then we need to ensure that index (0, 0) represents a grid cell whose top left
+        # corner is at (-51.2m, -51.2m) in real space and index (199, 199) represents a grid whose bottom 
+        # right corner is at (51.2m, 51.2m) in real space. This also means that the real x, y center of cell
+        # (0, 0) is (-50.944m, -50.944m) and the center for cell (199, 199) is (-50.944m, 50.944m).
+        grid_xy_res     = torch.tensor(self.grid_xy_res, device=device)
+        grid_wh         = torch.tensor([W_bev, H_bev], device=device)
+        max_grid_xy     = grid_wh - 1
+        min_real_xy     = ((-grid_wh / 2) * grid_xy_res) + (grid_xy_res - (grid_xy_res / 2))
+        max_real_xy     = -min_real_xy
+        grid_2d[..., :2] = (((max_real_xy - min_real_xy) * grid_2d[..., :2]) / max_grid_xy) + min_real_xy
 
         # Create 3D grid space, this phenomenon is called pillaring, this is where we
         # raise the 2D grid space to 3D pillars given some z-axis reference points
@@ -677,24 +690,22 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         proj_2d = torch.einsum("vtttki,txyzij->vxyzkj", cam_proj_matrices[:, None, None, None, ...], grid_3d[None, ..., None])
         proj_2d = proj_2d[..., :2, 0]
 
-        # scale 2D projection points to feature map scales to make reference points
-        hw_ratio   = multiscale_fmap_shapes / img_spatial_shape
-        wh_ratio   = torch.stack([hw_ratio[:, 1], hw_ratio[:, 0]], dim=-1)
+        # since we just need reference points normalized to be within range (-1, 1), we just need to divide ref_points indexes
+        # by max img indexes (img_w - 1, img_h - 1), then scale accordingly.
         ref_points = proj_2d.reshape(num_views, H_bev * W_bev, self.num_z_ref_points, 2).permute(1, 0, 2, 3)
-        ref_points = ref_points[:, :, None, :, :] * wh_ratio[None, None, :, None, :]
-        ref_points = ref_points[None].tile(batch_size, 1, 1, 1, 1, 1)
+        ref_points = 2 * (ref_points[:, :, None, :, :] / (img_spatial_shape[None, None, None] - 1)) - 1
+        ref_points = ref_points[None].tile(batch_size, 1, 1, multiscale_fmap_shapes.shape[0], 1, 1)
 
         # calculate the attention mask
-        max_xy            = torch.stack([multiscale_fmap_shapes[:, 1], multiscale_fmap_shapes[:, 0]], dim=-1)
-        scaled_ref_points = ref_points / max_xy[None, None, None, :, None, :]
-        attention_mask    = (scaled_ref_points[..., 0] >= 0) & (scaled_ref_points[..., 1] <= 1)
+        attention_mask    = (ref_points[..., 0] >= -1) & (ref_points[..., 1] <= 1)
 
         output = super(SpatialCrossAttention, self).forward(
             queries=bev_queries, 
             ref_points=ref_points, 
             value=multiscale_fmaps, 
             value_spatial_shapes=multiscale_fmap_shapes, 
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            normalize_ref_points=False
         )
         v_hit  = attention_mask.sum(dim=(2, 3, 4))[..., None]
         return (1 / v_hit) * output

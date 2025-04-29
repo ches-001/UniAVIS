@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .attentions import MultiHeadedAttention, DeformableAttention
-from .common import AddNorm, PosEmbedding1D, DetectionHead
+from .common import AddNorm, PosEmbedding1D, DetectionHead, SimpleMLP
 from typing import *
 
 
@@ -43,11 +43,7 @@ class TrackFormerDecoderLayer(nn.Module):
             concat_vq_for_offset=False,
         )
         self.addnorm2            = AddNorm(input_dim=self.embed_dim)
-        self.mlp                 = nn.Sequential(
-            nn.Linear(self.embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.embed_dim),
-        )
+        self.mlp                 = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
         self.addnorm3            = AddNorm(input_dim=self.embed_dim)
 
     def forward(
@@ -105,7 +101,12 @@ class TrackFormerDecoderLayer(nn.Module):
             aug_out2 = aug_out2 + og_det_queries
 
         out3 = self.deform_attention(
-            aug_out2, ref_points, bev_features, bev_spatial_shape, attention_mask=padding_mask[..., None]
+            aug_out2, 
+            ref_points, 
+            bev_features, 
+            bev_spatial_shape, 
+            attention_mask=padding_mask[..., None], 
+            normalize_ref_points=False
         )
         out4 = self.addnorm2(out2, out3)
         out5 = self.mlp(out4)
@@ -244,7 +245,7 @@ class TrackFormer(nn.Module):
             self.bev_feature_shape,
             batch_size=batch_size, 
             device=bev_features.device, 
-            normalize=False, 
+            normalize=True, 
             n_sample=queries.shape[1]
         ).unsqueeze(dim=-2)
 

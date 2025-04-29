@@ -24,4 +24,6 @@ PAPERS:
 11. A Multiple Shooting Algorithm for Direct Solution of Optimal Control Problems
 
 12. PointPillars: Fast Encoder of Object Detection from Point Cloud
+
+13. PointNet: Deep Learning on Point Sets for 3D Classification and Segmentation
 """

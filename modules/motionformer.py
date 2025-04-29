@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .common import AddNorm, PosEmbedding1D, SpatialSinusoidalPosEmbedding
+from .common import AddNorm, PosEmbedding1D, SpatialSinusoidalPosEmbedding, SimpleMLP
 from .attentions import MultiHeadedAttention, DeformableAttention
 from typing import *
 
@@ -44,12 +44,7 @@ class MotionFormerDecoderLayer(nn.Module):
             num_fmap_levels=1,
             concat_vq_for_offset=False
         )
-        self.mlp                  = nn.Sequential(
-            nn.Linear(self.embed_dim*3, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.embed_dim),
-            nn.LayerNorm(self.embed_dim)
-        )
+        self.mlp                  = SimpleMLP(self.embed_dim * 3, self.embed_dim, self.dim_feedforward)
 
     def forward(
             self, 
@@ -89,7 +84,9 @@ class MotionFormerDecoderLayer(nn.Module):
         map_ctx_queries    = self.map_cross_addnorm(map_ctx_queries, self_attn_queries)
 
         bev_spatial_shape  = torch.LongTensor([self.bev_feature_shape], device=bev_features.device)
-        goal_point_queries = self.deformable_attention(queries, ref_points, bev_features, bev_spatial_shape)
+        goal_point_queries = self.deformable_attention(
+            queries, ref_points, bev_features, bev_spatial_shape, normalize_ref_points=False
+        )
         
         ctx_queries        = torch.concat([agent_ctx_queries, map_ctx_queries, goal_point_queries], dim=-1)
         output             = self.mlp(ctx_queries)
@@ -136,12 +133,12 @@ class MotionFormer(nn.Module):
         self.agent_query_pos_emb = PosEmbedding1D(
             self.max_num_agents, 
             self.embed_dim, 
-            learnable=self.learnable_pe
+            learnable=False
         )
         self.map_query_pos_emb   = PosEmbedding1D(
             self.max_num_maps, 
             self.embed_dim, 
-            learnable=self.learnable_pe
+            learnable=False
         )
         self.ctx_query_emb       = PosEmbedding1D(
             self.max_num_agents * self.num_modes, 
@@ -155,18 +152,10 @@ class MotionFormer(nn.Module):
 
         self.decoder_modules    = self._create_decoder_layers()
 
-        self.mode_score_mlp   = nn.Sequential(
-            nn.Linear(self.embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, 1),
-            nn.Softmax(dim=-1)
-        )
-
-        self.trajectory_mlp = nn.Sequential(
-            nn.Linear(self.embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.pred_horizon * 5),
-        )
+        self.agent_query_mlp    = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
+        self.map_query_mlp      = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
+        self.mode_score_mlp     = SimpleMLP(self.embed_dim, 1, self.dim_feedforward, final_activation=nn.Softmax(dim=-1))
+        self.trajectory_mlp     = SimpleMLP(self.embed_dim, self.pred_horizon * 5, self.dim_feedforward)
 
     def _create_decoder_layers(self) -> nn.ModuleList:
         return nn.ModuleList([
@@ -227,8 +216,8 @@ class MotionFormer(nn.Module):
         k, *_                = agent_anchors.shape
         _, max_num_agents, _ = agent_queries.shape
         device               = bev_features.device
-        agent_queries        = agent_queries + self.agent_query_pos_emb()
-        map_queries          = map_queries + self.map_query_pos_emb()
+        agent_queries        = self.agent_query_mlp(agent_queries + self.agent_query_pos_emb())
+        map_queries          = self.agent_query_mlp(map_queries + self.map_query_pos_emb())
         
         # scene level anchors are points global coordinates that are not specific to any agent level coordinates
         # since we wish to generate scene level anchors for each agent level anchor, we generate them like so:
@@ -271,6 +260,8 @@ class MotionFormer(nn.Module):
         ones                  = torch.ones(*agent_goal_pos.shape[:-1], 1, dtype=agent_anchors.dtype, device=device)
         grid_xy_res           = torch.tensor(self.grid_xy_res, device=device)
         bev_wh                = torch.tensor([self.bev_feature_shape[1], self.bev_feature_shape[0]], device=device)
+        min_real_xy           = (-bev_wh / 2) * grid_xy_res
+        max_real_xy           = -min_real_xy
 
         # tile the projection matrix because the projection also needs to happen for each agent across each modality
         proj_matrix           = proj_matrix.tile(1, k, 1, 1)
@@ -282,11 +273,12 @@ class MotionFormer(nn.Module):
             # positions (which have a shape of (N, max_num_agents, 2)), we tile the second dimension by k, ensuring
             # that each modality has the same reference points, and to also match the referencce points to the context
             # query which has a shape of (N, max_num_agents * k, num_embed)
+            
+            # TODO: Revisit this ref_points conversion
             ref_points  = torch.concat([agent_goal_pos, ones], dim=-1)
             ref_points  = torch.einsum("naii,naik->naik", proj_matrix, ref_points[..., None])
             ref_points  = ref_points[..., :2, 0][..., None, :]
-            ref_points  = (ref_points / grid_xy_res[None, None, None, :]) + (bev_wh / 2)
-            ref_points  = ref_points
+            ref_points  = 2 * ((ref_points - min_real_xy) / (max_real_xy - min_real_xy)) - 1
 
             ctx_queries = self.decoder_modules[i](
                 bev_features=bev_features,

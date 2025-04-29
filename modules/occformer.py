@@ -1,6 +1,13 @@
 import torch
 import torch.nn as nn
-from .common import AddNorm, ConvBNorm, ConvTransposeBNorm, PosEmbedding1D, TemporalSpecificMLP
+from .common import (
+    AddNorm, 
+    ConvBNorm, 
+    ConvTransposeBNorm, 
+    PosEmbedding1D, 
+    TemporalSpecificMLP, 
+    SimpleMLP
+)
 from .attentions import MultiHeadedAttention
 from typing import *
 
@@ -141,16 +148,8 @@ class OccFormer(nn.Module):
             hidden_dim=self.dim_feedforward, 
             num_layers=self.num_tmlp_layers
         )
-        self.mask_features_mlp  = nn.Sequential(
-            nn.Linear(embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.embed_dim)
-        )
-        self.occ_features_mlp   = nn.Sequential(
-            nn.Linear(embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.embed_dim)
-        )
+        self.mask_features_mlp  = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
+        self.occ_features_mlp   = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
 
         self.downsampler        = nn.Upsample(scale_factor=1 / self.bev_downsmaple_scale, mode="bilinear")
         self.decoder_modules    = self._create_decoder_layers()

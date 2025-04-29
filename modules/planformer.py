@@ -1,14 +1,86 @@
 import torch
 import torch.nn as nn
-from .common import PosEmbedding1D, PosEmbedding2D
-from .attentions import DeformableAttention
-from .trackformer import TrackFormerDecoderLayer
+from .common import PosEmbedding1D, PosEmbedding2D, SimpleMLP, AddNorm
+from .attentions import MultiHeadedAttention, DeformableAttention
 from typing import *
 
 
-class PlanFormerDecoderLayer(TrackFormerDecoderLayer):
-    def __init__(self, *args, **kwargs):
-        super(PlanFormerDecoderLayer, self).__init__(*args, **kwargs)
+class PlanFormerDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        num_heads: int,
+        embed_dim: int,
+        num_ref_points: int=4,
+        dim_feedforward: int=512, 
+        dropout: float=0.1,
+        offset_scale: float=1.0,
+        bev_feature_shape: Tuple[int, int]=(200, 200),
+    ):
+        super(PlanFormerDecoderLayer, self).__init__()
+
+        self.num_heads         = num_heads
+        self.embed_dim         = embed_dim
+        self.num_ref_points    = num_ref_points
+        self.dim_feedforward   = dim_feedforward
+        self.dropout           = dropout
+        self.offset_scale      = offset_scale
+        self.bev_feature_shape = bev_feature_shape
+
+        self.self_attention      = MultiHeadedAttention(
+            self.num_heads, 
+            self.embed_dim, 
+            dropout=self.dropout, 
+        )
+        self.addnorm1            = AddNorm(input_dim=self.embed_dim)
+        self.deform_attention    = DeformableAttention(
+            self.num_heads,
+            self.embed_dim, 
+            num_ref_points=num_ref_points, 
+            dropout=self.dropout, 
+            offset_scale=self.offset_scale,
+            num_fmap_levels=1,
+            concat_vq_for_offset=False,
+        )
+        self.addnorm2            = AddNorm(input_dim=self.embed_dim)
+        self.mlp                 = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
+
+    def forward(
+            self, 
+            queries: torch.Tensor,
+            bev_features: torch.Tensor,
+            ref_points: torch.Tensor, 
+        ) -> torch.Tensor:
+        """
+        Input
+        --------------------------------
+        :queries: (N, num_queries, det_embeds) input queries (num_queries = num_detections + num_track)
+
+        :bev_features: (N, W_bev * H_bev, (C_bev or embed_dim))
+
+        :ref_points: (N, num_queries, 1, 2), reference points for the deformable attention
+
+        Returns
+        --------------------------------
+        :plan_queries: (N, num_queries, embed_dim), output queries to be fed into the next layer
+        """
+        H_bev, W_bev = self.bev_feature_shape
+        assert bev_features.shape[1] == H_bev * W_bev
+        assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
+
+        bev_spatial_shape = torch.LongTensor([[H_bev, W_bev]], device=queries.device)
+
+        out1 = self.self_attention(queries, queries, queries)
+        out2 = self.addnorm1(queries, out1)
+        out3 = self.deform_attention(
+            out2, 
+            ref_points, 
+            bev_features, 
+            bev_spatial_shape, 
+            normalize_ref_points=False
+        )
+        out4 = self.addnorm2(out2, out3)
+        out5 = self.mlp(out4)
+        return out5
 
 
 class PlanFormer(nn.Module):
@@ -58,20 +130,14 @@ class PlanFormer(nn.Module):
             embed_dim=self.embed_dim, 
             learnable=False
         )
-        self.plan_queries_mlp     = nn.Sequential(
-            nn.Linear(self.embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.embed_dim),
-            nn.MaxPool2d(kernel_size=(self.num_modes, 1), stride=1)
+        self.plan_queries_mlp     = SimpleMLP(
+            self.embed_dim, 
+            self.embed_dim, 
+            self.dim_feedforward, 
+            final_activation=nn.MaxPool2d(kernel_size=(self.num_modes, 1), stride=1)
         )
-
-        self.trajectory_mlp = nn.Sequential(
-            nn.Linear(self.embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.pred_horizon * 2),
-        )
-
-        self.decoder_modules       = self._create_decoder_layers()
+        self.trajectory_mlp       = SimpleMLP(self.embed_dim, self.pred_horizon * 2, self.dim_feedforward)
+        self.decoder_modules      = self._create_decoder_layers()
 
     def _create_decoder_layers(self) -> nn.ModuleList:
         return nn.ModuleList([PlanFormerDecoderLayer(
@@ -98,9 +164,9 @@ class PlanFormer(nn.Module):
 
         :bev_features: (N, H_bev * W_bev, (C_bev or embed_dim)) Bird eye view features from BEVFormer
 
-        :track_queries: (N, embed_dim) Agent track queries from the TrackFormer
+        :track_queries: (N, embed_dim) Ego vehicle track queries from the TrackFormer
 
-        :motion_queries: (N, k, embed_dim), Motion queries from the MotionFormer"
+        :motion_queries: (N, k, embed_dim), Ego vehicle motion queries from the MotionFormer"
 
         Returns
         --------------------------------
@@ -126,7 +192,7 @@ class PlanFormer(nn.Module):
             self.bev_feature_shape, 
             batch_size=batch_size,
             device=device,
-            normalize=False,
+            normalize=True,
             n_sample=1
         )
         ref_points     = ref_points[..., None, :]
@@ -137,9 +203,6 @@ class PlanFormer(nn.Module):
                 bev_features=bev_features, 
                 ref_points=ref_points
             )
-
-        trajectories = self.trajectory_mlp(plan_queries)
-        trajectories = trajectories.reshape(batch_size, self.pred_horizon, 2)
-        trajectories = trajectories.cumsum(dim=1)
+        trajectories = self.trajectory_mlp(plan_queries).reshape(batch_size, self.pred_horizon, 2).cumsum(dim=1)
         
         return plan_queries[:, 0, :], trajectories

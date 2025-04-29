@@ -3,7 +3,7 @@ import torch.nn as nn
 from torchvision.models import resnet
 from .backbone import ResNetBackBone
 from .attentions import TemporalSelfAttention, SpatialCrossAttention
-from .common import AddNorm, PosEmbedding2D 
+from .common import AddNorm, PosEmbedding2D, SimpleMLP
 from typing import *
     
 
@@ -52,13 +52,7 @@ class BEVFormerEncoderLayer(nn.Module):
             grid_xy_res=grid_xy_res
         )
         self.add_norm2          = AddNorm(self.embed_dim)
-
-        self.mlp                = nn.Sequential(
-            nn.Linear(self.embed_dim, self.dim_feedforward),
-            nn.ReLU(),
-            nn.Linear(self.dim_feedforward, self.embed_dim),
-        )
-
+        self.mlp                = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
         self.add_norm3          = AddNorm(self.embed_dim)
 
     def forward(
