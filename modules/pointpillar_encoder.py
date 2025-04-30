@@ -220,7 +220,6 @@ class PointNet(nn.Module):
         hdmt_hdmt_t = torch.matmul(hdtm, hdtm.permute(0, 2, 1).contiguous())
         l_reg    = (identity - hdmt_hdmt_t).pow(2).sum(dim=-1).sum(dim=-1).mean()
         return gfeatures, l_reg
-        
 
     def _apply_mlp(
             self, 
