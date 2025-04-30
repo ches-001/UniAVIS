@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .common import SimpleConvMLP, SimpleMLP
-from typing import Tuple, List, Optional, Type
+from typing import Tuple, List, Optional, Type, Union
 
 class PillarFeatureGenerator(nn.Module):
     def __init__(
@@ -119,7 +119,7 @@ class TNet(nn.Module):
 
         assert mlp_type in (SimpleMLP, SimpleConvMLP)
 
-        out_dims = list(map(lambda d : max(int(d * scale), 32), [64, 128, 1024, 512, 256]))
+        out_dims = list(map(lambda d : max(int(d * scale), 16), [64, 128, 1024, 512, 256]))
         self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2)
         self.shared_mlp2 = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2)
         self.shared_mlp3 = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2)
@@ -147,7 +147,7 @@ class TNet(nn.Module):
         Returns
         --------------------------------
         :out: (N, n, d), transformed input
-        :out: (N, d, d), Transformation matrix used to transform input
+        :tm: (N, d, d), Transformation matrix used to transform input
         """
         if isinstance(self.shared_mlp1, SimpleConvMLP):
             tm = self.shared_mlp1(x.permute(0, 2, 1).contiguous(), permute_dim=False)
@@ -169,5 +169,72 @@ class TNet(nn.Module):
 
 
 class PointNet(nn.Module):
-    def __init__(self):
+    def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, scale: float=1.0):
         super(PointNet, self).__init__()
+
+        out_dims         = list(map(lambda d : max(int(d * scale), 16), [64, 64, 128, 1024]))
+        self.tnet1       = TNet(in_dim, mlp_type=mlp_type, scale=scale)
+        self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2)
+        self.shared_mlp2 = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2)
+
+        self.tnet2       = TNet(out_dims[1], mlp_type=mlp_type, scale=scale)
+        self.shared_mlp3 = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2)
+        self.shared_mlp4 = mlp_type(in_dim=out_dims[2], out_dim=out_dims[3], hidden_dim=out_dims[3]//2)
+
+        self.pool        = nn.Sequential(
+            nn.AdaptiveMaxPool1d(output_size=1),
+            nn.Flatten(start_dim=1, end_dim=-1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input
+        --------------------------------
+        :x: (N, n, d), input batch of point cloud points where:
+            (N = batch size, n = number of points per batch, d = number of dimensions)
+
+        Returns
+        --------------------------------
+        :gfeatures: (N, d), Global feature representation of points per sample
+
+        :l_reg: 0D tensor, Loss regularisation term. This term is computed from the L2-norm between
+             an identity matrix I and the transformation matrix of the second TNet in the network 
+             multiplied by its transpose, This term is to be added to the loss function (accompanied 
+             with a scale factor). mathematically: **L_reg = ||I - M.M^T||^2**
+            This is necessary because the M matrix is large since its meant to affine transform points
+            in higher dimensional embedding space, as such we need to maintain orthogonality to avoid
+            things like abrupt scaling and shearing of points / objects
+        """
+        out, _    = self.tnet1(x)
+        out       = self._apply_mlp(out, self.shared_mlp1, permute_in=True, permute_out=False)
+        out       = self._apply_mlp(out, self.shared_mlp2, permute_in=False, permute_out=True)
+        out, hdtm = self.tnet2(out) # hdtm: High Dimensional Transform Matrix
+        out       = self._apply_mlp(out, self.shared_mlp3, permute_in=True, permute_out=False)
+        out       = self._apply_mlp(out, self.shared_mlp4, permute_in=False, permute_out=False)
+
+        if isinstance(self.shared_mlp4, SimpleConvMLP):
+            gfeatures = self.pool(out)
+        else:
+            gfeatures = self.pool(out.permute(0, 2, 1).contiguous())
+        identity    = torch.eye(hdtm.shape[1])[None, :, :]
+        hdmt_hdmt_t = torch.matmul(hdtm, hdtm.permute(0, 2, 1).contiguous())
+        l_reg    = (identity - hdmt_hdmt_t).pow(2).sum(dim=-1).sum(dim=-1).mean()
+        return gfeatures, l_reg
+        
+
+    def _apply_mlp(
+            self, 
+            x: torch.Tensor, 
+            mlp: Union[SimpleMLP, SimpleConvMLP], 
+            permute_in: bool=False, 
+            permute_out: bool=False,
+        ) ->torch.Tensor:
+        if isinstance(mlp, SimpleConvMLP):
+            if permute_in: 
+                x = x.permute(0, 2, 1).contiguous()
+            out = mlp(x, permute_dim=False)
+            if permute_out:
+                return out.permute(0, 2, 1).contiguous()
+            return out
+        return mlp(x)
+            
