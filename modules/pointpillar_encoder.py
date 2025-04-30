@@ -110,9 +110,21 @@ class PillarFeatureGenerator(nn.Module):
 
         output[output != output] = pad_value
         return output, output_pillars
-    
 
-class TNet(nn.Module):
+
+class GMaxPoolMixin:
+    shared_mlp1: Union[SimpleMLP, SimpleMLP]
+    dim_mode: str
+
+    def apply_max_pooling(self, x: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.shared_mlp1, SimpleConvMLP):
+            if self.dim_mode == "1d":
+                return x.max(dim=2)[0]
+            return x.max(dim=3)[0].permute(0, 2, 1).contiguous()
+        return x.max(dim=(1 if self.dim_mode == "1d" else 2))[0]
+
+
+class TNet(nn.Module, GMaxPoolMixin):
     def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, scale: float=1.0, dim_mode: str="2d"):
         super(TNet, self).__init__()
 
@@ -159,19 +171,12 @@ class TNet(nn.Module):
             tm = self.shared_mlp2(tm)
             tm = self.shared_mlp3(tm)
         
-        tm = self._apply_pooling(tm)
+        tm = self.apply_max_pooling(tm)
         tm = self.fc1(tm)
         tm = self.fc2(tm)
         tm = self.fc3(tm)
         x, tm = self._apply_transform(x, tm)
         return x, tm
-    
-    def _apply_pooling(self, x: torch.Tensor) -> torch.Tensor:
-        if isinstance(self.shared_mlp1, SimpleConvMLP):
-            if self.dim_mode == "1d":
-                return x.max(dim=2)[0]
-            return x.max(dim=3)[0].permute(0, 2, 1).contiguous()
-        return x.max(dim=(1 if self.dim_mode == "1d" else 2))[0]
     
     def _apply_transform(self, x: torch.Tensor, tm: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.dim_mode == "1d":
@@ -182,7 +187,7 @@ class TNet(nn.Module):
         return x, tm
 
 
-class PointNet(nn.Module):
+class PointNet(nn.Module, GMaxPoolMixin):
     def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, scale: float=1.0, dim_mode: str="2d"):
         super(PointNet, self).__init__()
 
@@ -223,16 +228,9 @@ class PointNet(nn.Module):
         out, hdtm = self.tnet2(out) # hdtm: High Dimensional Transform Matrix
         out       = self._apply_mlp(out, self.shared_mlp3, permute_in=True, permute_out=False)
         out       = self._apply_mlp(out, self.shared_mlp4, permute_in=False, permute_out=False)
-        gfeatures = self._apply_pooling(out)
+        gfeatures = self.apply_max_pooling(out)
         l_reg     = self._compute_l_reg(hdtm)
         return gfeatures, l_reg
-    
-    def _apply_pooling(self, x: torch.Tensor) -> torch.Tensor:
-        if isinstance(self.shared_mlp1, SimpleConvMLP):
-            if self.dim_mode == "1d":
-                return x.max(dim=2)[0]
-            return x.max(dim=3)[0].permute(0, 2, 1).contiguous()
-        return x.max(dim=(1 if self.dim_mode == "1d" else 2))[0]
     
     def _compute_l_reg(self, hdtm: torch.Tensor) -> torch.Tensor:
         identity = torch.eye(hdtm.shape[2])
