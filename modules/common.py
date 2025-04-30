@@ -367,15 +367,17 @@ class SimpleConvMLP(nn.Module):
             out_dim: int, 
             hidden_dim: int, 
             mid_activation: Optional[nn.Module]=None, 
-            final_activation: Optional[nn.Module]=None
+            final_activation: Optional[nn.Module]=None,
+            dim_mode: str="1d"
         ):
         super(SimpleConvMLP, self).__init__()
-
+    
         self.in_dim           = in_dim
         self.out_dim          = out_dim
         self.hidden_dim       = hidden_dim
         self.mid_activation   = mid_activation or nn.ReLU()
         self.final_activation = final_activation or nn.Identity()
+        self.dim_mode         = dim_mode
 
         self.conv = nn.Sequential(
             ConvBNorm(
@@ -384,7 +386,7 @@ class SimpleConvMLP(nn.Module):
                 kernel_size=1, 
                 stride=1, 
                 activation=self.mid_activation, 
-                dim_mode="1d"
+                dim_mode=self.dim_mode
             ),
             ConvBNorm(
                 self.hidden_dim, 
@@ -392,14 +394,25 @@ class SimpleConvMLP(nn.Module):
                 kernel_size=1, 
                 stride=1, 
                 activation=self.final_activation, 
-                dim_mode="1d"
+                dim_mode=self.dim_mode
             ),
         )
 
     def forward(self, x: torch.Tensor, permute_dim: bool=True) -> torch.Tensor:
-        if permute_dim:
-            return self.conv(x.permute(0, 2, 1).contiguous()).permute(0, 2, 1).contiguous()
-        return self.conv(x)
+        if self.dim_mode == "1d":
+            assert x.ndim == 3
+            if permute_dim:
+                return self.conv(
+                    x.permute(0, 2, 1).contiguous()
+                ).permute(0, 2, 1).contiguous()
+            return self.conv(x)
+        else:
+            assert x.ndim == 4
+            if permute_dim:
+                return self.conv(
+                    x.permute(0, 3, 1, 2).contiguous()
+                ).permute(0, 2, 3, 1).contiguous()
+            return self.conv(x)
         
 
 
