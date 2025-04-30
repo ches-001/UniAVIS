@@ -154,14 +154,15 @@ class OccFormer(nn.Module):
         self.downsampler        = nn.Upsample(scale_factor=1 / self.bev_downsmaple_scale, mode="bilinear")
         self.decoder_modules    = self._create_decoder_layers()
         self.conv_transpose     = nn.Sequential(
+            ConvBNorm(embed_dim, embed_dim, kernel_size=1, stride=1, padding=0),
             ConvTransposeBNorm(
                 embed_dim, 
-                embed_dim // 2, 
+                embed_dim,
                 kernel_size=self.bev_downsmaple_scale, 
                 stride=self.bev_downsmaple_scale, 
                 padding=0
             ),
-            ConvBNorm(embed_dim // 2, embed_dim, kernel_size=1, stride=1, padding=0),
+            ConvBNorm(embed_dim, embed_dim, kernel_size=1, stride=1, padding=0),
         )
 
     def _create_decoder_layers(self) -> nn.ModuleList:

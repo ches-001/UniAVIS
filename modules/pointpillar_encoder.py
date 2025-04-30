@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import Tuple, List, Optional
+from .common import SimpleConvMLP, SimpleMLP
+from typing import Tuple, List, Optional, Type
 
 class PillarFeatureGenerator(nn.Module):
     def __init__(
@@ -109,3 +110,64 @@ class PillarFeatureGenerator(nn.Module):
 
         output[output != output] = pad_value
         return output, output_pillars
+    
+
+
+class TNet(nn.Module):
+    def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, scale: float=1.0):
+        super(TNet, self).__init__()
+
+        assert mlp_type in (SimpleMLP, SimpleConvMLP)
+
+        out_dims = list(map(lambda d : max(int(d * scale), 32), [64, 128, 1024, 512, 256]))
+        self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2, mid_activation=nn.ReLU())
+        self.shared_mlp2 = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2, mid_activation=nn.ReLU())
+        self.shared_mlp3 = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2, mid_activation=nn.ReLU())
+        self.pool        = nn.Sequential(
+            nn.AdaptiveMaxPool1d(output_size=1),
+            nn.Flatten(start_dim=1, end_dim=-1)
+        )
+        self.fc1         = nn.Sequential(
+            nn.Linear(out_dims[2], out_dims[3]),
+            nn.ReLU()
+        )
+        self.fc2         = nn.Sequential(
+            nn.Linear(out_dims[3], out_dims[4]),
+            nn.ReLU()
+        )
+        self.fc3         = nn.Linear(out_dims[4], in_dim**2)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Input
+        --------------------------------
+        :x: (N, n, d), input batch of point cloud points where:
+            (N = batch size, n = number of points per batch, d = number of dimensions)
+
+        Returns
+        --------------------------------
+        :out: (N, n, d), transformed input
+        :out: (N, d, d), Transformation matrix used to transform input
+        """
+        if isinstance(self.shared_mlp1, SimpleConvMLP):
+            tm = self.shared_mlp1(x.permute(0, 2, 1).contiguous(), permute_dim=False)
+            tm = self.shared_mlp2(tm, permute_dim=False)
+            tm = self.shared_mlp3(tm, permute_dim=False)
+            tm = self.pool(tm)
+        else:
+            tm = self.shared_mlp1(x)
+            tm = self.shared_mlp2(tm)
+            tm = self.shared_mlp3(tm)
+            tm = self.pool(tm.permute(0, 2, 1).contiguous())
+        
+        tm = self.fc1(tm)
+        tm = self.fc2(tm)
+        tm = self.fc3(tm)
+        tm = tm.reshape(tm.shape[0], self.shared_mlp1.in_dim, self.shared_mlp1.in_dim)
+        x  = torch.matmul(x, tm)
+        return x, tm
+
+
+class PointNet(nn.Module):
+    def __init__(self):
+        super(PointNet, self).__init__()

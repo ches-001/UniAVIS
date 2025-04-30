@@ -12,12 +12,13 @@ class ConvBNorm(nn.Module):
             kernel_size: Union[int, Tuple[int, int]], 
             stride: Union[int, Tuple[int, int]]=1, 
             padding: Optional[Union[int, Tuple[int, int]]]=None,
-            activation: Optional[Type]=nn.ReLU,
+            activation: Optional[nn.Module]=None,
             bias: bool=True,
             no_batchnorm: bool=False,
-            batchnorm_first: bool=True
+            batchnorm_first: bool=True,
+            dim_mode: str="2d"
         ):
-        super(ConvBNorm, self).__init__()
+        super(ConvBNorm, self).__init__() 
 
         if padding is None:
             if isinstance(kernel_size, int):
@@ -25,10 +26,12 @@ class ConvBNorm(nn.Module):
             else:
                 padding = [i//2 for i in kernel_size]
 
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        dim_mode              = dim_mode.lower()
+        self.in_channels      = in_channels
+        self.out_channels     = out_channels
         self._batchnorm_first = batchnorm_first
-        self.conv = nn.Conv2d(
+
+        self.conv             = getattr(nn, f"Conv{dim_mode}")(
             in_channels,
             out_channels, 
             kernel_size=kernel_size, 
@@ -36,8 +39,8 @@ class ConvBNorm(nn.Module):
             padding=padding,
             bias=bias
         )
-        self.norm = nn.BatchNorm2d(out_channels) if (not no_batchnorm) else nn.Identity()
-        self.activation = activation() if (activation is not None) else nn.Identity()
+        self.norm             = getattr(nn, f"BatchNorm{dim_mode}")(out_channels) if (not no_batchnorm) else nn.Identity()
+        self.activation       = activation or nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
@@ -57,18 +60,21 @@ class ConvTransposeBNorm(nn.Module):
             kernel_size: Union[int, Tuple[int, int]], 
             stride: Union[int, Tuple[int, int]]=1, 
             padding: Optional[Union[int, Tuple[int, int]]]=None,
-            activation: Optional[Type]=nn.ReLU,
+            activation: Optional[nn.Module]=None,
             bias: bool=True,
             no_batchnorm: bool=False,
-            batchnorm_first: bool=True
+            batchnorm_first: bool=True,
+            dim_mode: str="2d"
         ):
         super(ConvTransposeBNorm, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        padding = padding or 0
+
+        dim_mode              = dim_mode.lower()
+        self.in_channels      = in_channels
+        self.out_channels     = out_channels
+        padding               = padding or 0
         self._batchnorm_first = batchnorm_first
 
-        self.conv_transpose = nn.ConvTranspose2d(
+        self.conv_transpose   = getattr(nn, f"ConvTranspose{dim_mode}")(
             in_channels, 
             out_channels, 
             kernel_size, 
@@ -76,8 +82,8 @@ class ConvTransposeBNorm(nn.Module):
             padding=padding, 
             bias=bias
         )
-        self.norm = nn.BatchNorm2d(out_channels) if (not no_batchnorm) else nn.Identity()
-        self.activation = activation() if (activation is not None) else nn.Identity()
+        self.norm             = getattr(nn, f"BatchNorm{dim_mode}")(out_channels) if (not no_batchnorm) else nn.Identity()
+        self.activation       = activation or nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv_transpose(x)
@@ -329,29 +335,72 @@ class ProtoSegModule(nn.Module):
 class SimpleMLP(nn.Module):
     def __init__(
             self, 
-            in_features: int, 
-            out_features, 
+            in_dim: int, 
+            out_dim: int, 
             hidden_dim: int, 
             mid_activation: Optional[nn.Module]=None, 
             final_activation: Optional[nn.Module]=None
         ):
         super(SimpleMLP, self).__init__()
 
-        self.in_features      = in_features
-        self.out_features     = out_features
+        self.in_dim           = in_dim
+        self.out_dim          = out_dim
         self.hidden_dim       = hidden_dim
         self.mid_activation   = mid_activation or nn.ReLU()
         self.final_activation = final_activation or nn.Identity()
 
         self.fc = nn.Sequential(
-            nn.Linear(self.in_features, self.hidden_dim),
+            nn.Linear(self.in_dim, self.hidden_dim),
             self.mid_activation,
-            nn.Linear(hidden_dim, out_features),
+            nn.Linear(hidden_dim, self.out_dim),
             self.final_activation
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
+    
+
+class SimpleConvMLP(nn.Module):
+    def __init__(
+            self, 
+            in_dim: int, 
+            out_dim: int, 
+            hidden_dim: int, 
+            mid_activation: Optional[nn.Module]=None, 
+            final_activation: Optional[nn.Module]=None
+        ):
+        super(SimpleConvMLP, self).__init__()
+
+        self.in_dim           = in_dim
+        self.out_dim          = out_dim
+        self.hidden_dim       = hidden_dim
+        self.mid_activation   = mid_activation or nn.ReLU()
+        self.final_activation = final_activation or nn.Identity()
+
+        self.conv = nn.Sequential(
+            ConvBNorm(
+                self.in_dim, 
+                self.hidden_dim, 
+                kernel_size=1, 
+                stride=1, 
+                activation=self.mid_activation, 
+                dim_mode="1d"
+            ),
+            ConvBNorm(
+                self.hidden_dim, 
+                self.out_dim, 
+                kernel_size=1, 
+                stride=1, 
+                activation=self.final_activation, 
+                dim_mode="1d"
+            ),
+        )
+
+    def forward(self, x: torch.Tensor, permute_dim: bool=True) -> torch.Tensor:
+        if permute_dim:
+            return self.conv(x.permute(0, 2, 1).contiguous()).permute(0, 2, 1).contiguous()
+        return self.conv(x)
+        
 
 
 class TemporalSpecificMLP(nn.Module):
