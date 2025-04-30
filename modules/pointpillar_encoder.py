@@ -120,20 +120,20 @@ class TNet(nn.Module):
         assert mlp_type in (SimpleMLP, SimpleConvMLP)
 
         out_dims = list(map(lambda d : max(int(d * scale), 32), [64, 128, 1024, 512, 256]))
-        self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2, mid_activation=nn.ReLU())
-        self.shared_mlp2 = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2, mid_activation=nn.ReLU())
-        self.shared_mlp3 = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2, mid_activation=nn.ReLU())
+        self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2)
+        self.shared_mlp2 = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2)
+        self.shared_mlp3 = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2)
         self.pool        = nn.Sequential(
             nn.AdaptiveMaxPool1d(output_size=1),
             nn.Flatten(start_dim=1, end_dim=-1)
         )
         self.fc1         = nn.Sequential(
             nn.Linear(out_dims[2], out_dims[3]),
-            nn.ReLU()
+            nn.LeakyReLU(0.2)
         )
         self.fc2         = nn.Sequential(
             nn.Linear(out_dims[3], out_dims[4]),
-            nn.ReLU()
+            nn.LeakyReLU(0.2)
         )
         self.fc3         = nn.Linear(out_dims[4], in_dim**2)
 
