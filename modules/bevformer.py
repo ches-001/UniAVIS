@@ -236,13 +236,13 @@ class BEVFormer(nn.Module):
             multiscale_fmap_shapes[i][1] = W_fmap
             multiscale_fmaps[i]          = fmap
 
-        multiscale_fmaps = torch.concat(multiscale_fmaps, dim=-1).permute(0, 1, 3, 2).contiguous()
+        multiscale_fmaps = torch.concat(multiscale_fmaps, dim=-1).permute(0, 1, 3, 2)
 
         # apply positional embedding to BEV queries
         bev_pos_embs         = self.bev_pos_emb()
         bev_queries          = self.bev_query[None].tile(batch_size, 1, 1, 1)
         bev_queries          = bev_queries + bev_pos_embs
-        bev_queries          = bev_queries.permute(0, 2, 3, 1).contiguous()
+        bev_queries          = bev_queries.permute(0, 2, 3, 1)
         bev_queries          = bev_queries.reshape(batch_size, H_bev * W_bev, self.embed_dim)
 
         bev_spatial_shape = torch.LongTensor([self.bev_query_shape], device=device)

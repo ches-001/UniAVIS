@@ -81,16 +81,16 @@ class OccFormerDecoderLayer(nn.Module):
         )
 
         ds_dense_features = self.downsampler(dense_features)
-        ds_dense_features = ds_dense_features.permute(0, 2, 3, 1).contiguous()
+        ds_dense_features = ds_dense_features.permute(0, 2, 3, 1)
         ds_dense_features = ds_dense_features.reshape(
             batch_size, ds_shape[0]*ds_shape[1], self.embed_dim
         )
         out1              = self.self_attention(ds_dense_features, ds_dense_features, ds_dense_features)
         out2              = self.addnorm1(ds_dense_features, out1)
-        mask              = torch.matmul(out2, mask_features.permute(0, 2, 1).contiguous())
+        mask              = torch.matmul(out2, mask_features.permute(0, 2, 1))
         out3              = self.cross_attention(out2, agent_features, agent_features, attention_mask=mask)
         out4              = self.addnorm1(out2, out3)
-        out4              = out4.permute(0, 2, 1).contiguous()
+        out4              = out4.permute(0, 2, 1)
         out4              = out4.reshape(batch_size, self.embed_dim, *ds_shape)
         out5              = self.upsampler(out4) + dense_features
         return out5
@@ -220,7 +220,7 @@ class OccFormer(nn.Module):
         pos_emb         = self.agent_pos_emb().tile(batch_size, 1, 1)
         sparse_features = torch.concat([track_queries, pos_emb, x_queries], dim=-1)
 
-        bev_features    = bev_features.permute(0, 2, 1).contiguous()
+        bev_features    = bev_features.permute(0, 2, 1)
         bev_features    = bev_features.reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
         dense_features  = self.downsampler(bev_features)
 
@@ -244,9 +244,9 @@ class OccFormer(nn.Module):
             if self.training or (not self.training and tidx == self.num_layers - 1):
                 occ_features = self.occ_features_mlp(mask_features)
                 proba_map    = self.conv_transpose(dense_features)
-                proba_map    = proba_map.permute(0, 2, 1, 3).contiguous().reshape(batch_size, -1, self.embed_dim)
-                occupancy    = torch.matmul(occ_features, proba_map.permute(0, 2, 1).contiguous())
-                occupancy    = occupancy.permute(0, 2, 1).contiguous()
+                proba_map    = proba_map.permute(0, 2, 1, 3).reshape(batch_size, -1, self.embed_dim)
+                occupancy    = torch.matmul(occ_features, proba_map.permute(0, 2, 1))
+                occupancy    = occupancy.permute(0, 2, 1)
                 occupancy    = occupancy.reshape(batch_size, self.max_num_agents, *self.bev_feature_shape)
                 if self.training:
                     occupancies.append(occupancy)

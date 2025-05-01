@@ -23,8 +23,8 @@ class PillarFeatureGenerator(nn.Module):
         """
         Input
         --------------------------------
-        :point_clouds: (N, n, 4) Point cloud data (n = number of points per sample), with 4
-          dimensions (x, y, z, r) where r is reflectance and x, y, z are in meters
+        :point_clouds: (N, num_points, d) Point cloud data (num_points = number of points per sample), 
+            with d=4 dimensions (x, y, z, r) where r is reflectance and x, y, z are in meters
 
         :pad_value: Value to pad empty points in pillars
 
@@ -34,15 +34,15 @@ class PillarFeatureGenerator(nn.Module):
 
         :output_pillars: (N, max_pillars), output pillar indexes
         """
-        batch_size      = point_clouds.shape[0]
-        device          = point_clouds.device
-        x_range         = self.xyz_range[0]
-        y_range         = self.xyz_range[1]
-        min_xy          = torch.tensor([x_range[0], y_range[0]], device=device)
-        max_xy          = torch.tensor([x_range[1], y_range[1]], device=device)
-        pillar_wh       = torch.tensor(self.pillar_wh, device=device)
-        num_xy_grids    = torch.ceil((max_xy - min_xy) / pillar_wh)
-        num_xy_grids    = num_xy_grids.to(device=device, dtype=torch.int64)
+        batch_size   = point_clouds.shape[0]
+        device       = point_clouds.device
+        x_range      = self.xyz_range[0]
+        y_range      = self.xyz_range[1]
+        min_xy       = torch.tensor([x_range[0], y_range[0]], device=device)
+        max_xy       = torch.tensor([x_range[1], y_range[1]], device=device)
+        pillar_wh    = torch.tensor(self.pillar_wh, device=device)
+        num_xy_grids = torch.ceil((max_xy - min_xy) / pillar_wh)
+        num_xy_grids = num_xy_grids.to(device=device, dtype=torch.int64)
 
         # pillar i (x-axis / col idx), j (y-axis / row idx) indexes (The are indexes of all the pillars each
         # point belongs to, so these are indexes of non-empty pillars)
@@ -120,17 +120,17 @@ class GMaxPoolMixin:
         if isinstance(self.shared_mlp1, SimpleConvMLP):
             if self.dim_mode == "1d":
                 return x.max(dim=2)[0]
-            return x.max(dim=3)[0].permute(0, 2, 1).contiguous()
+            return x.max(dim=3)[0].permute(0, 2, 1)
         return x.max(dim=(1 if self.dim_mode == "1d" else 2))[0]
 
 
 class TNet(nn.Module, GMaxPoolMixin):
-    def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, scale: float=1.0, dim_mode: str="2d"):
+    def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, net_scale: float=1.0, dim_mode: str="2d"):
         super(TNet, self).__init__()
 
         assert mlp_type in (SimpleMLP, SimpleConvMLP)
 
-        out_dims         = list(map(lambda d : max(int(d * scale), 16), [64, 128, 1024, 512, 256]))
+        out_dims         = list(map(lambda d : max(int(d * net_scale), 16), [16, 32, 256, 128, 64]))
         self.dim_mode    = dim_mode
         kwargs           = {"dim_mode": self.dim_mode} if mlp_type == SimpleConvMLP else {}
         self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2, **kwargs)
@@ -151,7 +151,7 @@ class TNet(nn.Module, GMaxPoolMixin):
         Input
         --------------------------------
         :x: (N, n, d) for 1D or (N, p, n, d) for 2D, input batch of points grouped by pillars where:
-            (N = batch size, p is the number of pillars, n = number of points per pillar, d = number of dimensions)
+            (N = batch size, p = number of pillars, n = number of points per pillar, d = number of dimensions)
 
         Returns
         --------------------------------
@@ -160,9 +160,9 @@ class TNet(nn.Module, GMaxPoolMixin):
         """
         if isinstance(self.shared_mlp1, SimpleConvMLP):
             if self.dim_mode == "1d":
-                input = x.permute(0, 2, 1).contiguous()
+                input = x.permute(0, 2, 1)
             else:
-                input = x.permute(0, 3, 1, 2).contiguous()
+                input = x.permute(0, 3, 1, 2)
             tm = self.shared_mlp1(input, permute_dim=False)
             tm = self.shared_mlp2(tm, permute_dim=False)
             tm = self.shared_mlp3(tm, permute_dim=False)
@@ -188,31 +188,42 @@ class TNet(nn.Module, GMaxPoolMixin):
 
 
 class PointNet(nn.Module, GMaxPoolMixin):
-    def __init__(self, in_dim: int, mlp_type: Type=SimpleConvMLP, scale: float=1.0, dim_mode: str="2d"):
+    def __init__(
+            self, 
+            in_dim: int, 
+            mlp_type: Type=SimpleConvMLP, 
+            net_scale: float=1.0, 
+            out_interp_scale: float=1.0,
+            dim_mode: str="2d"
+        ):
         super(PointNet, self).__init__()
 
-        out_dims         = list(map(lambda d : max(int(d * scale), 16), [64, 64, 128, 1024]))
-        self.dim_mode    = dim_mode
-        kwargs           = {"dim_mode": self.dim_mode} if mlp_type == SimpleConvMLP else {}
+        
+        self.dim_mode         = dim_mode
+        self.net_scale        = net_scale
+        self.out_interp_scale = out_interp_scale
+        out_dims              = list(map(lambda d : max(int(d * self.net_scale), 16), [16, 16, 32, 256]))
+        kwargs                = {"dim_mode": self.dim_mode} if mlp_type == SimpleConvMLP else {}
 
-        self.tnet1       = TNet(in_dim, mlp_type=mlp_type, scale=scale, dim_mode=self.dim_mode)
-        self.shared_mlp1 = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2, **kwargs)
-        self.shared_mlp2 = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2, **kwargs)
+        self.tnet1            = TNet(in_dim, mlp_type=mlp_type, net_scale=net_scale, dim_mode=self.dim_mode)
+        self.shared_mlp1      = mlp_type(in_dim=in_dim, out_dim=out_dims[0], hidden_dim=out_dims[0]//2, **kwargs)
+        self.shared_mlp2      = mlp_type(in_dim=out_dims[0], out_dim=out_dims[1], hidden_dim=out_dims[1]//2, **kwargs)
 
-        self.tnet2       = TNet(out_dims[1], mlp_type=mlp_type, scale=scale, dim_mode=self.dim_mode)
-        self.shared_mlp3 = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2, **kwargs)
-        self.shared_mlp4 = mlp_type(in_dim=out_dims[2], out_dim=out_dims[3], hidden_dim=out_dims[3]//2, **kwargs)
+        self.tnet2            = TNet(out_dims[1], mlp_type=mlp_type, net_scale=net_scale, dim_mode=self.dim_mode)
+        self.shared_mlp3      = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2, **kwargs)
+        self.shared_mlp4      = mlp_type(in_dim=out_dims[2], out_dim=out_dims[3], hidden_dim=out_dims[3]//2, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Input
         --------------------------------
         :x: (N, n, d) for 1D or (N, p, n, d) for 2D, input batch of points grouped by pillars where:
-            (N = batch size, p is the number of pillars, n = number of points per pillar, d = number of dimensions)
+            (N = batch size, p = number of pillars, n = number of points per pillar, d = number of dimensions)
 
         Returns
         --------------------------------
-        :gfeatures: (N, d) or (N, p, d), Global feature representation of points per sample
+        :gfeatures: (N, c) or (N, p, c), Global feature representation of points per sample, where:
+            (c = new dim size)
 
         :l_reg: 0D tensor, Loss regularisation term. This term is computed from the L2-norm between
              an identity matrix I and the transformation matrix of the second TNet in the network 
@@ -230,6 +241,9 @@ class PointNet(nn.Module, GMaxPoolMixin):
         out       = self._apply_mlp(out, self.shared_mlp4, permute_in=False, permute_out=False)
         gfeatures = self.apply_max_pooling(out)
         l_reg     = self._compute_l_reg(hdtm)
+
+        if self.out_interp_scale != 1:
+            gfeatures = nn.functional.interpolate(gfeatures, scale_factor=self.out_interp_scale, mode="linear")
         return gfeatures, l_reg
     
     def _compute_l_reg(self, hdtm: torch.Tensor) -> torch.Tensor:
@@ -241,7 +255,7 @@ class PointNet(nn.Module, GMaxPoolMixin):
             permute_dim = (0, 1, 3, 2)
             identity    = identity[None, None, :, :]
         
-        hdmt_hdmt_t = torch.matmul(hdtm, hdtm.permute(*permute_dim).contiguous())
+        hdmt_hdmt_t = torch.matmul(hdtm, hdtm.permute(*permute_dim))
         l_reg       = (identity - hdmt_hdmt_t).pow(2).sum(dim=-1).sum(dim=-1)
         if l_reg.ndim == 1:
             return l_reg.mean()
@@ -257,10 +271,62 @@ class PointNet(nn.Module, GMaxPoolMixin):
         if isinstance(mlp, SimpleConvMLP):
             if permute_in: 
                 dims = (0, 2, 1) if self.dim_mode == "1d" else (0, 3, 1, 2)
-                x = x.permute(*dims).contiguous()
+                x = x.permute(*dims)
             out = mlp(x, permute_dim=False)
             if permute_out:
                 dims = (0, 2, 1) if self.dim_mode == "1d" else (0, 2, 3, 1)
-                return out.permute(*dims).contiguous()
+                return out.permute(*dims)
             return out
         return mlp(x)
+    
+
+class PillarFeatureNet(nn.Module):
+    def __init__(
+            self, 
+            pillar_wh: Tuple[float, float]=(0.16, 0.16),
+            max_points: int=100,
+            max_pillars: int=12_000,
+            xyz_range: Optional[List[Tuple[float, float]]]=None,
+            mlp_type: Type=SimpleConvMLP,
+            scale: float=1.0
+    ):
+        super(PillarFeatureNet, self).__init__()
+
+        self.pillar_gen = PillarFeatureGenerator(
+            pillar_wh, max_points=max_points, max_pillars=max_pillars, xyz_range=xyz_range
+        )
+        self.point_net        = PointNet(in_dim=9, mlp_type=mlp_type, scale=scale, dim_mode="2d")
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Input
+        --------------------------------
+        :x: (N, n, d), input batch of points with d dimensions:
+            (N = batch size, n = number of points per pillar, d = number of dimensions)
+
+        Returns
+        --------------------------------
+        :out: (N, c, H, W) Global feature from the point net scattered across a 2D grid of pillars
+
+        :l_reg: 0D tensor, Loss regularisation term from the point net
+        """
+        xp, pillar_indexes = self.pillar_gen(x)
+        gfeatures, l_reg   = self.point_net(xp)
+
+        batch_size    = x.shape[0]
+        num_pillars   = gfeatures.shape[1]
+        num_channels  = gfeatures.shape[2]
+        device        = x.device
+        min_yx        = torch.tensor([self.pillar_gen.xyz_range[1][0], self.pillar_gen.xyz_range[0][0]])
+        max_yx        = torch.tensor([self.pillar_gen.xyz_range[1][1], self.pillar_gen.xyz_range[0][1]])
+        pillar_hw     = torch.tensor([self.pillar_gen.pillar_wh[1], self.pillar_gen.pillar_wh[1]])
+        grid_hw       = torch.ceil((max_yx - min_yx) / pillar_hw)
+        grid_canvas   = torch.zeros(batch_size, num_channels, *grid_hw, device=device)
+        
+        # pillar i (x-axis / col idx), j (y-axis / row idx)
+        pillars_ij    = torch.stack([pillar_indexes % grid_hw[1], pillar_indexes // grid_hw[1]], dim=-1)
+        batch_indexes = torch.arange(batch_size, device=device)[:, None].tile(1, num_pillars)
+
+        grid_canvas[batch_indexes, pillars_ij[..., 1], pillars_ij[..., 0], :] = gfeatures
+        grid_canvas   = grid_canvas.permute(0, 3, 1, 2)
+        return grid_canvas, l_reg

@@ -218,7 +218,7 @@ class PosEmbedding2D(nn.Module):
         embs          = x_pos_embs + y_pos_embs    
 
         if flatten:
-            embs = embs.permute(0, 2, 3, 1).contiguous().reshape(1, -1, embs.shape[1])
+            embs = embs.permute(0, 2, 3, 1).reshape(1, -1, embs.shape[1])
         return embs
     
 
@@ -380,38 +380,22 @@ class SimpleConvMLP(nn.Module):
         self.dim_mode         = dim_mode
 
         self.conv = nn.Sequential(
-            ConvBNorm(
-                self.in_dim, 
-                self.hidden_dim, 
-                kernel_size=1, 
-                stride=1, 
-                activation=self.mid_activation, 
-                dim_mode=self.dim_mode
-            ),
-            ConvBNorm(
-                self.hidden_dim, 
-                self.out_dim, 
-                kernel_size=1, 
-                stride=1, 
-                activation=self.final_activation, 
-                dim_mode=self.dim_mode
-            ),
+            getattr(nn, f"Conv{dim_mode}")(self.in_dim, self.hidden_dim, kernel_size=1, stride=1),
+            self.mid_activation,
+            getattr(nn, f"Conv{dim_mode}")(self.hidden_dim, self.out_dim, kernel_size=1, stride=1),
+            self.final_activation
         )
 
     def forward(self, x: torch.Tensor, permute_dim: bool=True) -> torch.Tensor:
         if self.dim_mode == "1d":
             assert x.ndim == 3
             if permute_dim:
-                return self.conv(
-                    x.permute(0, 2, 1).contiguous()
-                ).permute(0, 2, 1).contiguous()
+                return self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)
             return self.conv(x)
         else:
             assert x.ndim == 4
             if permute_dim:
-                return self.conv(
-                    x.permute(0, 3, 1, 2).contiguous()
-                ).permute(0, 2, 3, 1).contiguous()
+                return self.conv(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
             return self.conv(x)
         
 

@@ -111,9 +111,9 @@ class MultiHeadedAttention(nn.Module):
         K = self.K_fc(K)
         V = self.V_fc(V)
         
-        Q = Q.reshape(N, Q.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
-        K = K.reshape(N, K.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
-        V = V.reshape(N, V.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3).contiguous()
+        Q = Q.reshape(N, Q.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        K = K.reshape(N, K.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        V = V.reshape(N, V.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         
         if padding_mask is not None:
             padding_mask   = padding_mask[:, None]
@@ -215,7 +215,7 @@ class DeformableAttention(nn.Module):
         value = self.V_fc(value).reshape(batch_size, value_len, self.num_heads, -1)
 
         # V shape: (batch_size, num_heads, embed_dim // num_head, value_len)
-        value = value.permute(0, 2, 3, 1).contiguous()
+        value = value.permute(0, 2, 3, 1)
 
         offsets     = offsets.reshape(batch_size, query_len, self.num_heads, self.num_fmap_levels, self.num_ref_points, 2)
         offsets     = self.offset_scale * offsets
@@ -229,7 +229,7 @@ class DeformableAttention(nn.Module):
             attn = attn.masked_fill(~attention_mask, value=0)
             
         # attn shape: (N, num_heads, num_fmap_levels, query_len, num_ref_points)
-        attn        = attn.permute(0, 2, 3, 1, 4).contiguous()
+        attn        = attn.permute(0, 2, 3, 1, 4)
         
         if normalize_ref_points:
             max_xy      = value_spatial_shapes.flip(dim=-1) - 1
@@ -238,7 +238,7 @@ class DeformableAttention(nn.Module):
         sample_locs = (ref_points[:, :, None, :, None, :] + offsets).clamp(min=-1, max=1)
 
         # sample_locs shape: (N, num_heads, num_fmap_levels, query_len, num_ref_points, 2)
-        sample_locs = sample_locs.permute(0, 2, 3, 1, 4, 5).contiguous()
+        sample_locs = sample_locs.permute(0, 2, 3, 1, 4, 5)
 
         value       = value.reshape(-1, *value.shape[2:])
         sample_locs = sample_locs.reshape(-1, *sample_locs.shape[2:])
@@ -390,7 +390,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
         value = self.V_fc(value).reshape(batch_size, num_views, value_len, self.num_heads, -1)
 
         # V shape: (batch_size, num_heads, num_views, num_embed // num_head, value_len)
-        value = value.permute(0, 3, 1, 4, 2).contiguous()
+        value = value.permute(0, 3, 1, 4, 2)
 
         offsets     = offsets.reshape(
             batch_size, 
@@ -426,7 +426,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
             attn = attn.masked_fill(~attention_mask, value=0)
 
         # attn shape: (batch_size, num_heads, num_views, num_fmap_levels, query_len, num_ref_points, num_z_ref_points)
-        attn        = attn.permute(0, 2, 3, 4, 1, 5, 6).contiguous()
+        attn        = attn.permute(0, 2, 3, 4, 1, 5, 6)
         
         if normalize_ref_points:
             max_xy     = value_spatial_shapes.flip(dim=-1) - 1
@@ -467,7 +467,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
         output = output.sum(dim=1)
         output = output.reshape(
             batch_size, self.num_heads, num_views, head_dim, query_len, all_points
-        ).permute(0, 4, 2, 1, 3, 5).contiguous()
+        ).permute(0, 4, 2, 1, 3, 5)
         output = output.reshape(batch_size, query_len, num_views, self.embed_dim, all_points)
         output = output.sum(dim=(2, -1))
         output = self.out_fc(output)
@@ -566,12 +566,12 @@ class TemporalSelfAttention(DeformableAttention):
         aligned_grid         = aligned_grid[..., :2, 0]
         aligned_grid[..., 0] = 2 * (aligned_grid[..., 0] / (W_bev - 1)) - 1
         aligned_grid[..., 1] = 2 * (aligned_grid[..., 1] / (H_bev - 1)) - 1
-        bev_histories        = bev_histories.permute(0, 2, 1).contiguous().reshape(batch_size, C_bev, H_bev, W_bev)
+        bev_histories        = bev_histories.permute(0, 2, 1).reshape(batch_size, C_bev, H_bev, W_bev)
         bev_histories        = F.grid_sample(
             bev_histories, aligned_grid, mode="bilinear", padding_mode="zeros", align_corners=True
         )
         
-        bev_histories = bev_histories.permute(0, 2, 3, 1).contiguous().reshape(batch_size, H_bev * W_bev, C_bev)
+        bev_histories = bev_histories.permute(0, 2, 3, 1).reshape(batch_size, H_bev * W_bev, C_bev)
         output = super(TemporalSelfAttention, self).forward(
             bev_queries,
             ref_points,
