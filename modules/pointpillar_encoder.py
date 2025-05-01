@@ -191,9 +191,9 @@ class PointNet(nn.Module, GMaxPoolMixin):
     def __init__(
             self, 
             in_dim: int, 
+            out_dim: int=256,
             mlp_type: Type=SimpleConvMLP, 
             net_scale: float=1.0, 
-            out_interp_scale: float=1.0,
             dim_mode: str="2d"
         ):
         super(PointNet, self).__init__()
@@ -201,8 +201,7 @@ class PointNet(nn.Module, GMaxPoolMixin):
         
         self.dim_mode         = dim_mode
         self.net_scale        = net_scale
-        self.out_interp_scale = out_interp_scale
-        out_dims              = list(map(lambda d : max(int(d * self.net_scale), 16), [16, 16, 32, 256]))
+        out_dims              = list(map(lambda d : max(int(d * self.net_scale), 16), [16, 16, 32]))
         kwargs                = {"dim_mode": self.dim_mode} if mlp_type == SimpleConvMLP else {}
 
         self.tnet1            = TNet(in_dim, mlp_type=mlp_type, net_scale=net_scale, dim_mode=self.dim_mode)
@@ -211,7 +210,7 @@ class PointNet(nn.Module, GMaxPoolMixin):
 
         self.tnet2            = TNet(out_dims[1], mlp_type=mlp_type, net_scale=net_scale, dim_mode=self.dim_mode)
         self.shared_mlp3      = mlp_type(in_dim=out_dims[1], out_dim=out_dims[2], hidden_dim=out_dims[2]//2, **kwargs)
-        self.shared_mlp4      = mlp_type(in_dim=out_dims[2], out_dim=out_dims[3], hidden_dim=out_dims[3]//2, **kwargs)
+        self.shared_mlp4      = mlp_type(in_dim=out_dims[2], out_dim=out_dim, hidden_dim=out_dim//2, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -241,9 +240,6 @@ class PointNet(nn.Module, GMaxPoolMixin):
         out       = self._apply_mlp(out, self.shared_mlp4, permute_in=False, permute_out=False)
         gfeatures = self.apply_max_pooling(out)
         l_reg     = self._compute_l_reg(hdtm)
-
-        if self.out_interp_scale != 1:
-            gfeatures = nn.functional.interpolate(gfeatures, scale_factor=self.out_interp_scale, mode="linear")
         return gfeatures, l_reg
     
     def _compute_l_reg(self, hdtm: torch.Tensor) -> torch.Tensor:
@@ -282,20 +278,23 @@ class PointNet(nn.Module, GMaxPoolMixin):
 
 class PillarFeatureNet(nn.Module):
     def __init__(
-            self, 
+            self,
+            out_dim: int=256,
             pillar_wh: Tuple[float, float]=(0.16, 0.16),
             max_points: int=100,
             max_pillars: int=12_000,
+            out_grid_hw: int=(200, 200),
             xyz_range: Optional[List[Tuple[float, float]]]=None,
             mlp_type: Type=SimpleConvMLP,
-            scale: float=1.0
+            net_scale: float=1.0
     ):
         super(PillarFeatureNet, self).__init__()
 
-        self.pillar_gen = PillarFeatureGenerator(
+        self.out_grid_hw    = out_grid_hw
+        self.pillar_gen     = PillarFeatureGenerator(
             pillar_wh, max_points=max_points, max_pillars=max_pillars, xyz_range=xyz_range
         )
-        self.point_net        = PointNet(in_dim=9, mlp_type=mlp_type, scale=scale, dim_mode="2d")
+        self.point_net      = PointNet(in_dim=9, out_dim=out_dim, mlp_type=mlp_type, net_scale=net_scale, dim_mode="2d")
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -321,12 +320,45 @@ class PillarFeatureNet(nn.Module):
         max_yx        = torch.tensor([self.pillar_gen.xyz_range[1][1], self.pillar_gen.xyz_range[0][1]])
         pillar_hw     = torch.tensor([self.pillar_gen.pillar_wh[1], self.pillar_gen.pillar_wh[1]])
         grid_hw       = torch.ceil((max_yx - min_yx) / pillar_hw)
-        grid_canvas   = torch.zeros(batch_size, num_channels, *grid_hw, device=device)
+        grid_hw       = grid_hw.to(dtype=torch.int64)
         
-        # pillar i (x-axis / col idx), j (y-axis / row idx)
+        # pillar i (x-axis / col idx), j (y-axis / row idx) in this case
         pillars_ij    = torch.stack([pillar_indexes % grid_hw[1], pillar_indexes // grid_hw[1]], dim=-1)
-        batch_indexes = torch.arange(batch_size, device=device)[:, None].tile(1, num_pillars)
 
+        # I was stuck in a delimma, where I had to make one of two choices concerning the design of this forward
+        # method. This code scatters the computed global features on a grid canvas in their respective 2D pillar
+        # positions as defined in the pillars_ij index tensor, I believe there are one of two ways of doing this:
+        #
+        # 1. Create the grid_canvas with its original (calculated) size, scatter the features on the canvas and
+        #   reshape the canvas to its desired output size via bilinear interpolation.
+        #
+        # 2. Create the grid_canvas with the desire output size, recalculate the ij indexes for the corresponding
+        #   pillars (scale to the new size) and then scatter the features on the canvas.
+        #
+        # Both methods ultimately result in the same grid size and I was about to go with the second method because
+        # the lack of interpolation made it look efficient and hence a better option, and also, since the grid is
+        # initialized to its desired size rather than its actual size, if the desired size is smaller (which it is 
+        # in my case) then it would have a lesser memory footprint. However, I decided to go with the first option
+        # because I figured that if I scaled the ij indexes down, it may cause features to be placed upon features, or
+        # in better words, features will be completely replaced by neighbouring features, simply because the ij indexes
+        # were calculated to be the same. Take for instance the (i, j) indexes of (300, 320) and (302, 322) on a (H x W)
+        # grid of size (500 x 441), suppose our desired grid shape is (200 x 200), these indexes will be updated with
+        # the formula: ij := ⌊ij * (new_WH / old_WH)⌋ where: ⌊.⌋ = floor(.), which will yield (136, 128) and (136, 128)
+        # respectively. These are two different global pillar features but they have the same spatial position on the 
+        # new grid despite having different positions on the old one, this means that one would simply overwrite the 
+        # other completely. Of course one can argue that despite being on different spatial positions on the old grid, 
+        # after bilinear interpolation (with the first method), the feature values will not remain the same. While that 
+        # is true, the resulting feature values from bilinear interpolation is a linear combination of neighbouring
+        # values, so the information of both features still make contributions, unlike in the second method.
+
+        # Perhaps I am just being paranoid and overreacting to the complete overwriting of global pillar features by close 
+        # neighbours, because afterall, the output is probably too big to tell the difference, well I might change the
+        # implementation later, time will tell.
+        batch_indexes = torch.arange(batch_size, device=device)[:, None].tile(1, num_pillars)
+        grid_canvas   = torch.zeros(batch_size, grid_hw[0].item(), grid_hw[1].item(), num_channels, device=device)
         grid_canvas[batch_indexes, pillars_ij[..., 1], pillars_ij[..., 0], :] = gfeatures
         grid_canvas   = grid_canvas.permute(0, 3, 1, 2)
+        
+        if grid_hw[0] != self.out_grid_hw[0] and grid_hw[1] != self.out_grid_hw[1]:
+            grid_canvas   = nn.functional.interpolate(grid_canvas, size=self.out_grid_hw, mode="bilinear")
         return grid_canvas, l_reg

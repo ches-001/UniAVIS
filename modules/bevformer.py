@@ -138,7 +138,7 @@ class BEVFormer(nn.Module):
             num_views: int=6,
             num_fmap_levels: int=4,
             grid_xy_res: Tuple[float, float]=(0.512, 0.512),
-            bev_query_shape: Tuple[int, int]=(200, 200),
+            bev_query_hw: Tuple[int, int]=(200, 200),
             z_ref_range: Tuple[float, float]=(-5.0, 3.0),
             learnable_pe: bool=False
         ):
@@ -158,18 +158,18 @@ class BEVFormer(nn.Module):
         self.num_views         = num_views
         self.num_fmap_levels   = num_fmap_levels
         self.grid_xy_res       = grid_xy_res
-        self.bev_query_shape   = bev_query_shape
+        self.bev_query_hw   = bev_query_hw
         self.z_ref_range       = z_ref_range
         self.learnable_pe      = learnable_pe
         self.offset_scale      = offset_scale
 
         self.backbone          = ResNetBackBone(self.in_img_channels, embed_dim, self.bb_block, self.bb_block_layers)
         # bev_queries: (C_bev, H_bev, W_bev)
-        self.bev_query         = nn.Parameter(torch.randn(self.embed_dim, *self.bev_query_shape))
+        self.bev_query         = nn.Parameter(torch.randn(self.embed_dim, *self.bev_query_hw))
         self.register_buffer("z_refs", torch.linspace(*z_ref_range, steps=self.num_z_ref_points))
         self.bev_pos_emb       = PosEmbedding2D(
-            bev_query_shape[1], 
-            bev_query_shape[0], 
+            bev_query_hw[1], 
+            bev_query_hw[0], 
             embed_dim=self.embed_dim, 
             learnable=self.learnable_pe
         )
@@ -216,7 +216,7 @@ class BEVFormer(nn.Module):
         :output: (N, H_bev * W_bev, C_bev), output BEV features
         """
         batch_size, num_views, C_img, H_img, W_img = imgs.shape
-        H_bev, W_bev = self.bev_query_shape
+        H_bev, W_bev = self.bev_query_hw
     
         device               = imgs.device
         imgs                 = imgs.reshape(batch_size * num_views, C_img, H_img, W_img)
@@ -245,7 +245,7 @@ class BEVFormer(nn.Module):
         bev_queries          = bev_queries.permute(0, 2, 3, 1)
         bev_queries          = bev_queries.reshape(batch_size, H_bev * W_bev, self.embed_dim)
 
-        bev_spatial_shape = torch.LongTensor([self.bev_query_shape], device=device)
+        bev_spatial_shape = torch.LongTensor([self.bev_query_hw], device=device)
         img_spatial_shape = torch.LongTensor([[H_img, W_img]], device=device)
 
         for encoder_idx in range(0, len(self.encoder_modules)):

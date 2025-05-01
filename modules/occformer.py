@@ -110,7 +110,7 @@ class OccFormer(nn.Module):
             offset_scale: float=1.0,
             learnable_pe: bool=True,
             num_tmlp_layers: int=2,
-            bev_feature_shape: Tuple[int, int]=(200, 200),
+            bev_feature_hw: Tuple[int, int]=(200, 200),
             bev_downsmaple_scale: int=4,
             op_attn_scale : int=2
         ):
@@ -131,7 +131,7 @@ class OccFormer(nn.Module):
         self.offset_scale         = offset_scale
         self.learnable_pe         = learnable_pe
         self.num_tmlp_layers      = num_tmlp_layers
-        self.bev_feature_shape    = bev_feature_shape
+        self.bev_feature_hw    = bev_feature_hw
         self.bev_downsmaple_scale = bev_downsmaple_scale
         self.op_attn_scale        = op_attn_scale
 
@@ -167,8 +167,8 @@ class OccFormer(nn.Module):
 
     def _create_decoder_layers(self) -> nn.ModuleList:
         dense_feature_shape = (
-            self.bev_feature_shape[0] // self.bev_downsmaple_scale, 
-            self.bev_feature_shape[1] // self.bev_downsmaple_scale
+            self.bev_feature_hw[0] // self.bev_downsmaple_scale, 
+            self.bev_feature_hw[1] // self.bev_downsmaple_scale
         )
         return nn.ModuleList([
             OccFormerDecoderLayer(
@@ -221,7 +221,7 @@ class OccFormer(nn.Module):
         sparse_features = torch.concat([track_queries, pos_emb, x_queries], dim=-1)
 
         bev_features    = bev_features.permute(0, 2, 1)
-        bev_features    = bev_features.reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
+        bev_features    = bev_features.reshape(batch_size, self.embed_dim, *self.bev_feature_hw)
         dense_features  = self.downsampler(bev_features)
 
         occupancies     = []
@@ -247,7 +247,7 @@ class OccFormer(nn.Module):
                 proba_map    = proba_map.permute(0, 2, 1, 3).reshape(batch_size, -1, self.embed_dim)
                 occupancy    = torch.matmul(occ_features, proba_map.permute(0, 2, 1))
                 occupancy    = occupancy.permute(0, 2, 1)
-                occupancy    = occupancy.reshape(batch_size, self.max_num_agents, *self.bev_feature_shape)
+                occupancy    = occupancy.reshape(batch_size, self.max_num_agents, *self.bev_feature_hw)
                 if self.training:
                     occupancies.append(occupancy)
                 else:

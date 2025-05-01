@@ -14,7 +14,7 @@ class PlanFormerDecoderLayer(nn.Module):
         dim_feedforward: int=512, 
         dropout: float=0.1,
         offset_scale: float=1.0,
-        bev_feature_shape: Tuple[int, int]=(200, 200),
+        bev_feature_hw: Tuple[int, int]=(200, 200),
     ):
         super(PlanFormerDecoderLayer, self).__init__()
 
@@ -24,7 +24,7 @@ class PlanFormerDecoderLayer(nn.Module):
         self.dim_feedforward   = dim_feedforward
         self.dropout           = dropout
         self.offset_scale      = offset_scale
-        self.bev_feature_shape = bev_feature_shape
+        self.bev_feature_hw = bev_feature_hw
 
         self.self_attention      = MultiHeadedAttention(
             self.num_heads, 
@@ -63,7 +63,7 @@ class PlanFormerDecoderLayer(nn.Module):
         --------------------------------
         :plan_queries: (N, num_queries, embed_dim), output queries to be fed into the next layer
         """
-        H_bev, W_bev = self.bev_feature_shape
+        H_bev, W_bev = self.bev_feature_hw
         assert bev_features.shape[1] == H_bev * W_bev
         assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
 
@@ -97,7 +97,7 @@ class PlanFormer(nn.Module):
             dropout: float=0.1,
             offset_scale: float=1.0,
             learnable_pe: bool=True,
-            bev_feature_shape: Tuple[int, int]=(200, 200)
+            bev_feature_hw: Tuple[int, int]=(200, 200)
         ):
         super(PlanFormer, self).__init__()
 
@@ -112,7 +112,7 @@ class PlanFormer(nn.Module):
         self.dropout              = dropout
         self.offset_scale         = offset_scale
         self.learnable_pe         = learnable_pe
-        self.bev_feature_shape    = bev_feature_shape
+        self.bev_feature_hw    = bev_feature_hw
         
         self.commands_emb         = PosEmbedding1D(
             self.num_commands, 
@@ -125,8 +125,8 @@ class PlanFormer(nn.Module):
             learnable=learnable_pe
         )
         self.bev_pos_emb          = PosEmbedding2D(
-            x_dim=self.bev_feature_shape[1], 
-            y_dim=self.bev_feature_shape[0], 
+            x_dim=self.bev_feature_hw[1], 
+            y_dim=self.bev_feature_hw[0], 
             embed_dim=self.embed_dim, 
             learnable=False
         )
@@ -147,7 +147,7 @@ class PlanFormer(nn.Module):
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
             offset_scale=self.offset_scale,
-            bev_feature_shape=self.bev_feature_shape
+            bev_feature_hw=self.bev_feature_hw
         ) for _ in range(self.num_layers)])
 
     def forward(
@@ -189,7 +189,7 @@ class PlanFormer(nn.Module):
         bev_features   = bev_features + bev_pos_emb
 
         ref_points     = DeformableAttention.generate_standard_ref_points(
-            self.bev_feature_shape, 
+            self.bev_feature_hw, 
             batch_size=batch_size,
             device=device,
             normalize=True,

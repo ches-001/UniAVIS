@@ -14,7 +14,7 @@ class MotionFormerDecoderLayer(nn.Module):
             dim_feedforward: int=512, 
             dropout: float=0.1,
             offset_scale: float=1.0,
-            bev_feature_shape: Tuple[int, int]=(200, 200),
+            bev_feature_hw: Tuple[int, int]=(200, 200),
         ):
         super(MotionFormerDecoderLayer, self).__init__()
 
@@ -24,7 +24,7 @@ class MotionFormerDecoderLayer(nn.Module):
         self.dim_feedforward    = dim_feedforward
         self.dropout            = dropout
         self.offset_scale       = offset_scale
-        self.bev_feature_shape  = bev_feature_shape
+        self.bev_feature_hw  = bev_feature_hw
 
         self.self_attention        = MultiHeadedAttention(self.num_heads, self.embed_dim, self.dropout)
         self.self_addnorm          = AddNorm(self.embed_dim)
@@ -83,7 +83,7 @@ class MotionFormerDecoderLayer(nn.Module):
         map_ctx_queries    = self.agent_cross_attention(self_attn_queries, map_queries, map_queries)
         map_ctx_queries    = self.map_cross_addnorm(map_ctx_queries, self_attn_queries)
 
-        bev_spatial_shape  = torch.LongTensor([self.bev_feature_shape], device=bev_features.device)
+        bev_spatial_shape  = torch.LongTensor([self.bev_feature_hw], device=bev_features.device)
         goal_point_queries = self.deformable_attention(
             queries, ref_points, bev_features, bev_spatial_shape, normalize_ref_points=False
         )
@@ -108,7 +108,7 @@ class MotionFormer(nn.Module):
             dropout: float=0.1,
             offset_scale: float=1.0,
             learnable_pe: bool=True,
-            bev_feature_shape: Tuple[int, int]=(200, 200),
+            bev_feature_hw: Tuple[int, int]=(200, 200),
             grid_xy_res: Tuple[float, float]=(0.512, 0.512),
         ):
 
@@ -126,7 +126,7 @@ class MotionFormer(nn.Module):
         self.dropout            = dropout
         self.offset_scale       = offset_scale
         self.learnable_pe       = learnable_pe
-        self.bev_feature_shape  = bev_feature_shape
+        self.bev_feature_hw  = bev_feature_hw
         self.grid_xy_res        = grid_xy_res
 
         self.spatial_pos_emb     = SpatialSinusoidalPosEmbedding(self.embed_dim)
@@ -166,7 +166,7 @@ class MotionFormer(nn.Module):
                 dim_feedforward=self.dim_feedforward,
                 dropout=self.dropout,
                 offset_scale=self.offset_scale,
-                bev_feature_shape=self.bev_feature_shape
+                bev_feature_hw=self.bev_feature_hw
 
             ) for _ in range(0, self.num_layers)
         ])
@@ -259,7 +259,7 @@ class MotionFormer(nn.Module):
         agent_goal_pos        = agent_goal_pos[..., 0, :].tile(1, k, 1)
         ones                  = torch.ones(*agent_goal_pos.shape[:-1], 1, dtype=agent_anchors.dtype, device=device)
         grid_xy_res           = torch.tensor(self.grid_xy_res, device=device)
-        bev_wh                = torch.tensor([self.bev_feature_shape[1], self.bev_feature_shape[0]], device=device)
+        bev_wh                = torch.tensor([self.bev_feature_hw[1], self.bev_feature_hw[0]], device=device)
         min_real_xy           = (-bev_wh / 2) * grid_xy_res
         max_real_xy           = -min_real_xy
 

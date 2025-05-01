@@ -15,7 +15,7 @@ class TrackFormerDecoderLayer(nn.Module):
         dim_feedforward: int=512, 
         dropout: float=0.1,
         offset_scale: float=1.0,
-        bev_feature_shape: Tuple[int, int]=(200, 200),
+        bev_feature_hw: Tuple[int, int]=(200, 200),
     ):
         super(TrackFormerDecoderLayer, self).__init__()
 
@@ -25,7 +25,7 @@ class TrackFormerDecoderLayer(nn.Module):
         self.dim_feedforward   = dim_feedforward
         self.dropout           = dropout
         self.offset_scale      = offset_scale
-        self.bev_feature_shape = bev_feature_shape
+        self.bev_feature_hw = bev_feature_hw
 
         self.self_attention      = MultiHeadedAttention(
             self.num_heads, 
@@ -72,7 +72,7 @@ class TrackFormerDecoderLayer(nn.Module):
         --------------------------------
         :track_queries: (N, num_queries, embed_dim), output queries to be fed into the next layer
         """
-        H_bev, W_bev = self.bev_feature_shape
+        H_bev, W_bev = self.bev_feature_hw
         assert bev_features.shape[1] == H_bev * W_bev
         assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
 
@@ -127,7 +127,7 @@ class TrackFormer(nn.Module):
             offset_scale: float=1.0,
             max_detections: int=900,
             learnable_pe: bool=True,
-            bev_feature_shape: Tuple[int, int]=(200, 200),
+            bev_feature_hw: Tuple[int, int]=(200, 200),
             track_threshold: float=0.5,
             det_3d: bool=True
         ):
@@ -143,7 +143,7 @@ class TrackFormer(nn.Module):
         self.offset_scale      = offset_scale
         self.max_detections    = max_detections
         self.learnable_pe      = learnable_pe
-        self.bev_feature_shape = bev_feature_shape
+        self.bev_feature_hw = bev_feature_hw
         self.track_threshold   = track_threshold
         self.det_3d            = det_3d
 
@@ -168,7 +168,7 @@ class TrackFormer(nn.Module):
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
             offset_scale=self.offset_scale,
-            bev_feature_shape=self.bev_feature_shape
+            bev_feature_hw=self.bev_feature_hw
         ) for _ in range(self.num_layers)])
     
 
@@ -242,7 +242,7 @@ class TrackFormer(nn.Module):
             queries = detection_queries
         
         ref_points        = DeformableAttention.generate_standard_ref_points(
-            self.bev_feature_shape,
+            self.bev_feature_hw,
             batch_size=batch_size, 
             device=bev_features.device, 
             normalize=True, 

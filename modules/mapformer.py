@@ -68,7 +68,7 @@ class MapFormer(TrackFormer):
         batch_size = bev_features.shape[0]
 
         protos = self.proto_seg_module(
-            bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_shape)
+            bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_hw)
         )
 
         if self.training:
