@@ -241,7 +241,7 @@ class SpatialSinusoidalPosEmbedding(nn.Module):
         input_og_shape           = input.shape
         input                    = input.reshape(input_og_shape[0], -1, input_og_shape[-1])
         axis_embed_dim           = self.embed_dim // input.shape[-1]
-        vec_pos                  = torch.arange(0, axis_embed_dim, dtype=torch.float32)
+        vec_pos                  = torch.arange(0, axis_embed_dim, device=input.device, dtype=torch.float32)
         even_mask                = (vec_pos % 2) == 0
         odd_mask                 = ~even_mask
         vec_pos                  = vec_pos[None, None, :].tile(*input.shape[:-1], 1)
@@ -281,7 +281,7 @@ class DetectionHead(nn.Module):
             nn.ReLU(),
         )
         self.obj_module            = nn.Linear(self.embed_dim, 1)
-        self.loc_module            = nn.Linear(self.embed_dim, 8 if self.det_3d else 4)
+        self.loc_module            = nn.Linear(self.embed_dim, 8 if self.det_3d else 5)
         self.classification_module = nn.Linear(self.embed_dim, self.num_classes)
         if self.num_seg_coefs:
             self.seg_coef_module = nn.Sequential(
@@ -297,7 +297,10 @@ class DetectionHead(nn.Module):
 
         Returns
         --------------------------------
-        :output: (N, max_objs, det_params) (det params = 8 or 4)
+        :output: (N, max_objs, det_params) (det_params = 8 or 5). For det_params = 8, we have:
+            [center_x, center_y, center_z, length, width, height, heading_angle, class_label].
+            For det_params = 4, we have [center_x, center_y, length, width, class_label]
+
         """
         out       = self.inception_module(x)
         obj_score = self.obj_module(out)

@@ -52,18 +52,22 @@ class MapFormer(TrackFormer):
 
         Returns
         --------------------------------
+        NOTE: (det_params = 8 or 5). For det_params = 8, we have:
+            [center_x, center_y, center_z, length, width, height, heading_angle, class_label].
+            For det_params = 4, we have [center_x, center_y, length, width, class_label]
+
         if training:
             :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
                         (including invalid detections)
 
-            :layers_detections: (num_layers, N, num_queries, embed_dim), output context query of each layer
+            :layers_detections: (num_layers, N, num_queries, det_params), output context query of each layer
 
             :layer_seg_masks: (num_layers, N, num_queries, H_bev, W_bev), batch of multi-item segmentations of each layer
 
         else:
-            :detections: (N, num_queries, embed_dim), output context query of laast layer
+            :detections: (N, num_queries, det_params), output context query of laast layer
 
-            :layer_seg_masks: (num_layers, N, num_queries, H_bev, W_bev), batch of multi-item segmentations of last layer          
+            :seg_masks: (N, num_queries, H_bev, W_bev), batch of multi-item segmentations of last layer          
         """
         batch_size = bev_features.shape[0]
 

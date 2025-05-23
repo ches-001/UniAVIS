@@ -15,7 +15,7 @@ class PillarFeatureGenerator(nn.Module):
         self.pillar_wh   = pillar_wh
         self.max_points  = max_points
         self.max_pillars = max_pillars
-        self.xyz_range   = xyz_range or [(0.0, 70.4), (-40.0, 40.0), (-3.0, 1.0)]
+        self.xyz_range   = xyz_range or [(-51.2, 51.2), (-51.2, 51.2), (-5.0, 3.0)]
 
         for r in self.xyz_range: assert r[1] > r[0]
 
@@ -243,7 +243,7 @@ class PointNet(nn.Module, GMaxPoolMixin):
         return gfeatures, l_reg
     
     def _compute_l_reg(self, hdtm: torch.Tensor) -> torch.Tensor:
-        identity = torch.eye(hdtm.shape[2])
+        identity = torch.eye(hdtm.shape[2], device=hdtm.device)
         if self.dim_mode == "1d":
             permute_dim = (0, 2, 1)
             identity    = identity[None, :, :]

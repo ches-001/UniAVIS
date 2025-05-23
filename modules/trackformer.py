@@ -76,7 +76,7 @@ class TrackFormerDecoderLayer(nn.Module):
         assert bev_features.shape[1] == H_bev * W_bev
         assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
 
-        bev_spatial_shape = torch.LongTensor([[H_bev, W_bev]], device=queries.device)
+        bev_spatial_shape = torch.tensor([[H_bev, W_bev]], device=queries.device, dtype=torch.int64)
         num_queries       = queries.shape[1]
         num_det           = og_det_queries.shape[1]
         num_tracks        = num_queries - num_det
@@ -191,13 +191,17 @@ class TrackFormer(nn.Module):
 
         Returns
         --------------------------------
+        NOTE: (det_params = 8 or 5). For det_params = 8, we have:
+            [center_x, center_y, center_z, length, width, height, heading_angle, class_label].
+            For det_params = 4, we have [center_x, center_y, length, width, class_label]
+
         if training:
             :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
                     (including invalid detections). NOTE: num_queries = num_detections (max_detections) + num_track. 
                     num_track is the number of track_queries and it is dynamic as it depends on the number of valid.
                     detections
 
-            :layers_detections: (num_layers, N, num_queries, embed_dim), output context query of each layer
+            :layers_detections: (num_layers, N, num_queries, det_params)
 
         else:
             :detections: (N, num_queries, det_params) batch of detection for multiple identified items

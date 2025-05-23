@@ -630,7 +630,7 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
         :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
 
         :multiscale_fmaps:  (N, num_views, \sum{i=0}^{L-1} H_i \cdot W_i, C), reshaped and concatenated (along dim=1)
-                        feature maps from different pyramid levels / scales (L = num_fmap_levels)
+            feature maps from different pyramid levels / scales (L = num_fmap_levels)
 
         :multiscale_fmap_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
@@ -638,7 +638,10 @@ class SpatialCrossAttention(MultiView3DDeformableAttention):
 
         :z_refs: (num_z_ref_points, ) z-axis reference points
 
-        :cam_proj_matrices: (V, 3, 4) projection matrix of cameras, from real coord to image coord
+        :cam_proj_matrices: (V, 3, 4) projection matrix for each camera, from real 3D coord (ego vehicle frame) to 3D image
+            coord. This matrix is the product of the 3 x 3 (homogenized to 3 x 4) camera intrinsic matrix and the 4 x 4 camera
+            camera extrinsic matrix. Do note that the 4 x 4 extrinsic matrix could be 3 x 4 and the intrinsic left as a 3 x 3, 
+            but this non-homogeneous and not directly invertible.
 
         Returns
         --------------------------------

@@ -67,7 +67,7 @@ class PlanFormerDecoderLayer(nn.Module):
         assert bev_features.shape[1] == H_bev * W_bev
         assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
 
-        bev_spatial_shape = torch.LongTensor([[H_bev, W_bev]], device=queries.device)
+        bev_spatial_shape = torch.tensor([[H_bev, W_bev]], device=queries.device, dtype=torch.int64)
 
         out1 = self.self_attention(queries, queries, queries)
         out2 = self.addnorm1(queries, out1)

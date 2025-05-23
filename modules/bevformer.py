@@ -245,8 +245,8 @@ class BEVFormer(nn.Module):
         bev_queries          = bev_queries.permute(0, 2, 3, 1)
         bev_queries          = bev_queries.reshape(batch_size, H_bev * W_bev, self.embed_dim)
 
-        bev_spatial_shape = torch.LongTensor([self.bev_query_hw], device=device)
-        img_spatial_shape = torch.LongTensor([[H_img, W_img]], device=device)
+        bev_spatial_shape = torch.tensor([self.bev_query_hw], device=device, dtype=torch.int64)
+        img_spatial_shape = torch.tensor([[H_img, W_img]], device=device, dtype=torch.int64)
 
         for encoder_idx in range(0, len(self.encoder_modules)):
             bev_features = self.encoder_modules[encoder_idx](

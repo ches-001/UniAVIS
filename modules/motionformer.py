@@ -83,7 +83,7 @@ class MotionFormerDecoderLayer(nn.Module):
         map_ctx_queries    = self.agent_cross_attention(self_attn_queries, map_queries, map_queries)
         map_ctx_queries    = self.map_cross_addnorm(map_ctx_queries, self_attn_queries)
 
-        bev_spatial_shape  = torch.LongTensor([self.bev_feature_hw], device=bev_features.device)
+        bev_spatial_shape  = torch.tensor([self.bev_feature_hw], device=bev_features.device, dtype=torch.int64)
         goal_point_queries = self.deformable_attention(
             queries, ref_points, bev_features, bev_spatial_shape, normalize_ref_points=False
         )
@@ -195,12 +195,12 @@ class MotionFormer(nn.Module):
         :agent_queries: (N, max_num_agents, embed_dim) Agent queries from the TrackFormer network 
                         (max_num_agents = max number of agents)
 
-        :map_queries: (N, max_num_maps, embed_dim) Map queries from the Mapformer network 
+        :map_queries: (N, max_num_maps, embed_dim) Map queries from the MapFormer network 
                     (max_num_maps = max number of mapped areas)
 
-        :proj_matrix: (N, max_num_agents, 3, 3) projection (rotation and translation combined) matrix that projects each 
-                      agent from agent-level coordinates to global-level coordinates (in homogeneous coordinates)
-                      in the real world
+        :proj_matrix: (N, max_num_agents, 3, 3) projection (2D rotation and translation combined) matrix that projects 
+                      each agent from agent-level coordinates to global-level coordinates (in homogeneous coordinates)
+                      in the real world. NOTE: Typically. 
 
         Returns
         --------------------------------
@@ -217,7 +217,7 @@ class MotionFormer(nn.Module):
         _, max_num_agents, _ = agent_queries.shape
         device               = bev_features.device
         agent_queries        = self.agent_query_mlp(agent_queries + self.agent_query_pos_emb())
-        map_queries          = self.agent_query_mlp(map_queries + self.map_query_pos_emb())
+        map_queries          = self.map_query_mlp(map_queries + self.map_query_pos_emb())
         
         # scene level anchors are points global coordinates that are not specific to any agent level coordinates
         # since we wish to generate scene level anchors for each agent level anchor, we generate them like so:
@@ -254,8 +254,8 @@ class MotionFormer(nn.Module):
 
         queries               = ctx_queries + query_pos_emb
 
-        # reshape agent_goal_pos to (N, max_num_agents, 2) and create a ones tensor to set it and the next agent_goal_pos
-        # to homogeneous coordinate and tile k-times along the second axis
+        # reshape agent_goal_pos to (N, max_num_agents, 2) and create a ones tensor to set it and the next
+        # agent_goal_pos to homogeneous coordinate and tile k-times along the second axis
         agent_goal_pos        = agent_goal_pos[..., 0, :].tile(1, k, 1)
         ones                  = torch.ones(*agent_goal_pos.shape[:-1], 1, dtype=agent_anchors.dtype, device=device)
         grid_xy_res           = torch.tensor(self.grid_xy_res, device=device)
@@ -271,7 +271,7 @@ class MotionFormer(nn.Module):
             # scene-level goal positions predicted in the previous layer of each agent, we then convert the scene
             # level coordinates to BEV grid space coordinates. Since the reference points are computed from the goal
             # positions (which have a shape of (N, max_num_agents, 2)), we tile the second dimension by k, ensuring
-            # that each modality has the same reference points, and to also match the referencce points to the context
+            # that each modality has the same reference points, and to also match the reference points to the context
             # query which has a shape of (N, max_num_agents * k, num_embed)
             
             # TODO: Revisit this ref_points conversion
@@ -293,7 +293,7 @@ class MotionFormer(nn.Module):
             mode_trajectories = mode_trajectories.reshape(batch_size, max_num_agents, k, self.pred_horizon, 5)
 
             # we use cumsum method here because the agent estimates velocities, given that velocity is the rate of
-            # change of distance overtime, a cummulative sum of velocities will yield an actual distance trajectory
+            # change of distance overtime, a cumulative sum of velocities will yield an actual distance trajectory
             xy_traj           = mode_trajectories[..., :2].cumsum(dim=3)
             mode_trajectories = torch.concat([xy_traj, mode_trajectories[..., 2:]], dim=-1)
             mode_scores       = mode_scores.reshape(batch_size, max_num_agents, k)
