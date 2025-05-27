@@ -34,7 +34,27 @@ def download_gcfile_to_temp(gcf_path: str):
     return temp_path
         
 
-def apply_polygon_to_image(
+def draw_stop_sign_on_map(
+        map_img: np.ndarray, 
+        position: map_pb2.MapPoint, 
+        transform: np.ndarray, 
+        xy_min: np.ndarray,
+        xy_max: np.ndarray,
+        color: Tuple[int, int, int],
+        sign_radius: int=5,
+    ):
+    point = np.asarray([position.x, position.y, position.z, 1])
+    point = (transform @ point[:, None]).T[:, :2]
+    point = (point - xy_min) / (xy_max - xy_min)
+    if point[:, 0] < 0 or point[:, 0] > 1 or point[:, 1] < 0 or point[:, 1] > 1:
+        return
+    point[:, 0] *= (map_img.shape[0] - 1)
+    point[:, 1] *= (map_img.shape[1] - 1)
+    point = point[0].astype(int).tolist()
+    cv2.circle(map_img, center=point, radius=sign_radius, color=list(color), thickness=-1)
+
+
+def draw_polygon_om_map(
         map_img: np.ndarray, 
         polygons: Iterable[map_pb2.MapPoint], 
         transform: np.ndarray,
@@ -45,16 +65,15 @@ def apply_polygon_to_image(
         is_closed: bool=True,
         line_thickness: int=1
     ):
-    points = np.asarray([[p.x, p.y, p.z] for p in polygons])
-    points = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)
+    points = np.asarray([[p.x, p.y, p.z, 1] for p in polygons])
     points = (transform @ points.T).T[:, :2]
     points = (points - xy_min) / (xy_max - xy_min)
     mask = (((points[:, 0] >= 0) & (points[:, 0] <= 1)) & (points[:, 1] >= 0) & (points[:, 1] <= 1))
     if not np.any(mask):
         return
     points = points[mask]
-    points[:, 0] = points[:, 0] * (map_img.shape[0] - 1)
-    points[:, 1] = points[:, 1] * (map_img.shape[1] - 1)
+    points[:, 0] *= (map_img.shape[0] - 1)
+    points[:, 1] *= (map_img.shape[1] - 1)
     points = points.astype(int)
     if fill:
         cv2.fillPoly(map_img, pts=[points], color=color)
@@ -77,44 +96,56 @@ def construct_frame_map(
     for feature in map_features:
         if feature.HasField("lane"):
             color = LANE_TYPES.get(feature.lane.type, DEFAULT)[0]
-            apply_polygon_to_image(
+            draw_polygon_om_map(
                 map_img, feature.lane.polyline, transform, xy_min, xy_max, color, False, False, line_thickness
             )
 
         elif feature.HasField("road_line"):
             color = ROAD_LINE_TYPES.get(feature.road_line.type, DEFAULT)[0]
-            apply_polygon_to_image(
+            draw_polygon_om_map(
                 map_img, feature.road_line.polyline, transform, xy_min, xy_max, color, False, False, line_thickness
             )
 
         elif feature.HasField("road_edge"):
             color = ROAD_EDGE_TYPES.get(feature.road_edge.type, DEFAULT)[0]
-            apply_polygon_to_image(
+            draw_polygon_om_map(
                 map_img, feature.road_edge.polyline, transform, xy_min, xy_max, color, False, False, line_thickness
             )
 
         elif feature.HasField("stop_sign"):
             color = STOP_SIGN_TYPE[0]
-            pass # TODO
+            draw_stop_sign_on_map(map_img, feature.stop_sign.position, transform, xy_min, xy_max, color, sign_radius=5)
 
         elif feature.HasField("crosswalk"):
             color = CROSSWALK_TYPE[0]
-            apply_polygon_to_image(
+            draw_polygon_om_map(
                 map_img, feature.crosswalk.polygon, transform, xy_min, xy_max, color, True, line_thickness
             )
 
         elif feature.HasField("speed_bump"):
             color = SPEED_BUMP_TYPE[0]
-            apply_polygon_to_image(
+            draw_polygon_om_map(
                 map_img, feature.speed_bump.polygon, transform, xy_min, xy_max, color, True, line_thickness
             )
         
         elif feature.HasField("driveway"):
             color = DRIVEWAY_TYPE[0]
-            apply_polygon_to_image(
+            draw_polygon_om_map(
                 map_img, feature.driveway.polygon, transform, xy_min, xy_max, color, True, line_thickness
             )
     return map_img
+
+
+def interpolate_points(points: np.ndarray, num_points: int) -> np.ndarray:
+    assert points.ndim == 2
+    interp_x = np.linspace(0, points.shape[0] - 1, num=num_points)
+    orig_x = np.arange(0, points.shape[0])
+
+    interp_points = []
+    for i in range(0, points.shape[1]):
+        interp_points.append(np.interp(interp_x, orig_x, points[:, i]))
+    interp_points = np.stack(interp_points, axis=1)
+    return interp_points
 
 
 def process_perception_frame(
@@ -134,7 +165,7 @@ def process_perception_frame(
     camera_proj_matrix = {"intrinsic": {}, "extrinsic": {}}
     laser_proj_matrix = {"extrinsic": {}}
     camera_labels = {}
-    ego_pose   = frame.pose
+    ego_pose   = np.reshape(frame.pose.transform, (4, 4))
     laser_labels = frame.laser_labels
     timestamp = frame.timestamp_micros
 
@@ -144,7 +175,7 @@ def process_perception_frame(
         "box": {
             "center_x": label.box.center_x, 
             "center_y": label.box.center_y, 
-            "center_x": label.box.center_z,
+            "center_z": label.box.center_z,
             "length": label.box.length,
             "width": label.box.width,
             "height": label.box.height,
@@ -164,7 +195,7 @@ def process_perception_frame(
         "camera_synced_box": "" if not label.most_visible_camera_name else {
             "center_x": label.camera_synced_box.center_x, 
             "center_y": label.camera_synced_box.center_y, 
-            "center_x": label.camera_synced_box.center_z,
+            "center_z": label.camera_synced_box.center_z,
             "length": label.camera_synced_box.length,
             "width": label.camera_synced_box.width,
             "height": label.camera_synced_box.height,
@@ -181,6 +212,7 @@ def process_perception_frame(
 
         view_path = os.path.join(IMAGES_LOCAL_PATH, f"{sample_name}_frame_{frame_idx}_view_{image_data.name}.png")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img, (other_kwargs["cam_img_size"][1], other_kwargs["cam_img_size"][0]))
         cv2.imwrite(view_path, img)
         camera_view_paths.append(view_path)
 
@@ -231,7 +263,7 @@ def process_perception_frame(
 
         # laser projection matrices
         laser_calibrations = frame.context.laser_calibrations[view_idx]
-        laser_extrinsic = np.reshape(laser_calibrations.extrinsic, (4, 4))
+        laser_extrinsic = np.reshape(laser_calibrations.extrinsic.transform, (4, 4))
         laser_proj_matrix["extrinsic"][laser_calibrations.name] = laser_extrinsic
 
     xy_min = np.asarray([other_kwargs["xy_range"][0][0], other_kwargs["xy_range"][1][0]])
@@ -264,12 +296,12 @@ def process_perception_frame(
     point_cloud = np.concatenate(points, axis=0)
     camera_proj = np.concatenate(cp_points, axis=0)
 
-    points_mask = (points[:, :2] >= xy_min) & (points[:, :2] <= xy_max)
+    points_mask = (point_cloud[:, :2] >= xy_min) & (point_cloud[:, :2] <= xy_max)
     points_mask = points_mask[:, 0] & points_mask[:, 1]
     
-    point_cloud = point_cloud[points_mask]
-    camera_proj = camera_proj[points_mask]
-
+    point_cloud = interpolate_points(point_cloud[points_mask], other_kwargs["num_laser_points"])
+    camera_proj = interpolate_points(camera_proj[points_mask], other_kwargs["num_laser_points"])
+    
     point_cloud_path = os.path.join(POINT_CLOUD_LOCAL_PATH, f"{sample_name}_frame_{frame_idx}.npz")
     np.savez(point_cloud_path, point_cloud)
 
@@ -308,7 +340,7 @@ async def offload_to_executor(func: Callable, func_args: Tuple[Any], executor_ty
             return await event_loop.run_in_executor(GlobalThreadPoolExecutor, func, *func_args)
 
 
-async def download_and_process_perception_sample(
+async def download_and_process_sample(
         gcf_path: str, 
         dset_category: str,
         other_kwargs: Optional[Dict[str, Any]]=None
@@ -356,7 +388,7 @@ async def run(other_kwargs: Optional[Dict[str, Any]]=None):
         ["training", "testing", "validation"], [TrainingFiles, TestingFiles, ValidationFiles]
     ):
         for gcf_path in gcf_paths: 
-            tasks.append(asyncio.create_task(download_and_process_perception_sample(
+            tasks.append(asyncio.create_task(download_and_process_sample(
                 gcf_path, dset_category, other_kwargs=other_kwargs
             )))
 
@@ -403,10 +435,19 @@ if __name__ == "__main__":
         help="Number of concurrent process pthread pool executor calls"
     )
     parser.add_argument(
-        "--map_img_width", type=int, default=800, metavar="", help="Map image width"
+        "--cam_img_width", type=int, default=640, metavar="", help="Camera image width"
     )
     parser.add_argument(
-        "--map_img_height", type=int, default=800, metavar="", help="Map image height"
+        "--cam_img_height", type=int, default=480, metavar="", help="Camera image height"
+    )
+    parser.add_argument(
+        "--map_img_width", type=int, default=512, metavar="", help="Map image width"
+    )
+    parser.add_argument(
+        "--map_img_height", type=int, default=512, metavar="", help="Map image height"
+    )
+    parser.add_argument(
+        "--num_laser_points", type=int, default=100_000, metavar="", help="Number of points in point cloud"
     )
     parser.add_argument(
         "--map_min_x", type=float, default=-51.2, metavar="", 
@@ -440,8 +481,10 @@ if __name__ == "__main__":
     GlobalProcessPoolExecutor = ProcessPoolExecutor(args.max_proc_workers, mp_context=MpContext)
 
     other_kwargs = {
+        "cam_img_size": (args.cam_img_height, args.cam_img_width),
         "map_img_size": (args.map_img_height, args.map_img_width),
-        "xy_range": ((args.map_min_x, args.map_max_x), (args.map_min_y, args.map_max_y))
+        "xy_range": ((args.map_min_x, args.map_max_x), (args.map_min_y, args.map_max_y)),
+        "num_laser_points": args.num_laser_points,
     }
     asyncio.run(run(other_kwargs=other_kwargs))
     

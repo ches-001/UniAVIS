@@ -51,7 +51,7 @@ class TrackFormerDecoderLayer(nn.Module):
             queries: torch.Tensor,
             bev_features: torch.Tensor,
             ref_points: torch.Tensor, 
-            og_det_queries: torch.Tensor,
+            orig_det_queries: torch.Tensor,
             padding_mask: torch.Tensor,
         ) -> torch.Tensor:
         """
@@ -64,7 +64,7 @@ class TrackFormerDecoderLayer(nn.Module):
 
         :ref_points: (N, num_queries, 1, 2), reference points for the deformable attention
 
-        :og_det_queries: (N, num_detections, det_embeds), original object / detection queries
+        :orig_det_queries: (N, num_detections, det_embeds), original object / detection queries
 
         :padding_mask: (N, num_queries), padding / attention mask for queries (0 if to ignore else 1)
 
@@ -78,27 +78,27 @@ class TrackFormerDecoderLayer(nn.Module):
 
         bev_spatial_shape = torch.tensor([[H_bev, W_bev]], device=queries.device, dtype=torch.int64)
         num_queries       = queries.shape[1]
-        num_det           = og_det_queries.shape[1]
+        num_det           = orig_det_queries.shape[1]
         num_tracks        = num_queries - num_det
         q_and_k           = queries
         
         # i could have easily done queries[:, o_queries.shape[1]: :] += o_queries or so, but inplace operations
         # on tensors with gradient history screw up gradients and causes inplace errors
         if num_tracks > 0:
-            q_and_k = [q_and_k[:, :num_tracks, :], q_and_k[:, num_tracks:, :] + og_det_queries]
+            q_and_k = [q_and_k[:, :num_tracks, :], q_and_k[:, num_tracks:, :] + orig_det_queries]
             q_and_k = torch.concat(q_and_k, dim=1)
         else:
-            q_and_k = q_and_k + og_det_queries
+            q_and_k = q_and_k + orig_det_queries
 
         out1     = self.self_attention(q_and_k, q_and_k, queries, padding_mask=padding_mask)
         out2     = self.addnorm1(queries, out1)
         aug_out2 = out2
 
         if num_tracks > 0:
-            aug_out2 = [out2[:, :num_tracks, :], out2[:, num_tracks:, :] + og_det_queries]
+            aug_out2 = [out2[:, :num_tracks, :], out2[:, num_tracks:, :] + orig_det_queries]
             aug_out2 = torch.concat(aug_out2, dim=1)
         else:
-            aug_out2 = aug_out2 + og_det_queries
+            aug_out2 = aug_out2 + orig_det_queries
 
         out3 = self.deform_attention(
             aug_out2, 
@@ -259,7 +259,7 @@ class TrackFormer(nn.Module):
                 queries=queries,
                 bev_features=bev_features,
                 ref_points=ref_points,
-                og_det_queries=detection_queries,
+                orig_det_queries=detection_queries,
                 padding_mask=padding_mask
             )
             if not self.training:
