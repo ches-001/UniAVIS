@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from utils.io_utils import load_pickle_file, load_json_file, load_img
+from utils.io_utils import load_pickle_file
 from utils.img_utils import generate_occupancy_map
 from ._container import FrameData, MultiFrameData, BatchMultiFrameData
 from typing import Union, Dict, Any, Tuple, Optional, List
