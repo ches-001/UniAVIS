@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from utils.io_utils import load_pickle_file, load_json_file, load_and_process_img
+from utils.io_utils import load_pickle_file, load_json_file, load_img
 from utils.img_utils import generate_occupancy_map
 from ._container import FrameData, MultiFrameData, BatchMultiFrameData
 from typing import Union, Dict, Any, Tuple, Optional, List
@@ -145,7 +145,7 @@ class WaymoDataset(Dataset):
             if idx >= num_frames - 1:
                 break
             laser_labels_path = sample_dict[idx]["laser_labels_path"]
-            laser_labels_list = load_json_file(laser_labels_path)
+            laser_labels_list = load_pickle_file(laser_labels_path)
 
             for obj_idx in range(0, len(laser_labels_list)):
                 obj_id = laser_labels_list[obj_idx]["id"]
@@ -202,13 +202,11 @@ class WaymoDataset(Dataset):
 
     @check_perf
     def _load_cam_views(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
-        cam_view_paths = frame_dict["camera_view_paths"]
-        cam_view_paths = sorted(cam_view_paths)
-        cam_views = []
-        for view_path in cam_view_paths:
-            view = load_and_process_img(view_path, self.cam_img_size, scale=True)
-            cam_views.append(view)
-        cam_views = torch.stack(cam_views, dim=0)
+        cam_view_path = frame_dict["camera_view_path"]
+        cam_views = np.load(cam_view_path)
+        cam_views = torch.from_numpy(cam_views) / 255
+        if cam_views.shape[2] != self.cam_img_size[0] or cam_views.shape[3] != self.cam_img_size[1]:
+            cam_views = F.interpolate(cam_views, size=self.cam_img_size, mode="bilinear")
         return cam_views
 
     
@@ -216,12 +214,10 @@ class WaymoDataset(Dataset):
     def _load_point_cloud(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
         point_cloud_path = frame_dict["laser"]["point_cloud_path"]
         point_cloud = np.load(point_cloud_path)
-        point_cloud = torch.from_numpy(point_cloud["arr_0"])
-        point_cloud = F.interpolate(
-            point_cloud.permute(1, 0)[None], 
-            size=self.num_cloud_points, 
-            mode="linear"
-        )[0].permute(1, 0)
+        point_cloud = torch.from_numpy(point_cloud)
+        if point_cloud.shape[0] != self.num_cloud_points:
+            point_cloud = F.interpolate(point_cloud.permute(1, 0)[None], size=self.num_cloud_points, mode="linear")
+            point_cloud = point_cloud[0].permute(1, 0)
         # shape: (num_points, 4)
         return point_cloud[..., [3, 4, 5, 0]]
 
@@ -229,7 +225,7 @@ class WaymoDataset(Dataset):
     @check_perf
     def _load_laser_labels(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
         laser_labels_path = frame_dict["laser_labels_path"]
-        laser_labels_list = load_json_file(laser_labels_path)
+        laser_labels_list = load_pickle_file(laser_labels_path)
         obj_3d_dets = []
 
         for obj_idx in range(0, len(laser_labels_list)):
@@ -280,7 +276,10 @@ class WaymoDataset(Dataset):
     @check_perf
     def _load_bev_road_map(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
         map_img_path = frame_dict["map_img_path"]
-        map_img = load_and_process_img(map_img_path, self.bev_map_size, scale=True)
+        map_img = np.load(map_img_path)
+        map_img = torch.from_numpy(map_img) / 255
+        if map_img.shape[1] != self.bev_map_size[0] or map_img.shape[2] != self.bev_map_size[1]:
+            map_img = F.interpolate(map_img[None], size=self.bev_map_size, mode="bilinear")[0]
         return map_img
     
     

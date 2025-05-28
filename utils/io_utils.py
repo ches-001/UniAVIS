@@ -52,19 +52,6 @@ def load_yaml_file(path: str) -> Dict[str, Any]:
         data = yaml.safe_load(f)
     return data
 
-def load_and_process_img(
-        img_path: str, 
-        img_size: Optional[Tuple[int, int]]=None, 
-        scale: bool=True,
-        read_flags: int=cv2.COLOR_RGB2BGR
-    ) -> torch.Tensor:
-
+def load_img(img_path: str, read_flags: int=cv2.COLOR_RGB2BGR) -> np.ndarray:
     img = cv2.imread(img_path, flags=read_flags)
-    if img_size is not None:
-        img = cv2.resize(img, dsize=(img_size[1], img_size[0]))
-    img = np.asarray(img).copy()
-    img = torch.from_numpy(img)
-    img = img.permute(2, 0, 1)
-    if scale:
-        img = (img / 255).to(dtype=torch.float32)
     return img
