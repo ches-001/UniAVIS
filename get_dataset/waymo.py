@@ -68,7 +68,7 @@ def draw_polygon_om_map(
         line_thickness: int=1
     ):
     points = np.asarray([[p.x, p.y, p.z, 1] for p in polygons])
-    points = (transform @ points.T).T[:, :2]
+    points = (points @ transform.T)[:, :2]
     points = (points - xy_min) / (xy_max - xy_min)
     mask = (((points[:, 0] >= 0) & (points[:, 0] <= 1)) & (points[:, 1] >= 0) & (points[:, 1] <= 1))
     if not np.any(mask):

@@ -33,15 +33,15 @@ class FrameData(DeviceChangeMixin):
 
     ego_pose: A [4, 4] transformation matrix to rotate relative coordinates of global frame to ego vehicle frame
 
-    cam_intrinsics: A 3 x 3 projection matrix for each camera to map from 3D camera frame to 2D image frame.
+    cam_intrinsic: A 3 x 3 projection matrix for each camera to map from 3D camera frame to 2D image frame.
         The tensor is of shape [V_cam, 3, 3]
 
     cam_extrinsics: A 4 x 4 projection matrix for each camera to map from camera frame to ego vehicle frame.
         The tensor is of shape [V_cam, 4, 4]
 
     motion_tracks: This tensor contains the movement trajectory of dynamic agents in a given frame from timestep t to an
-        arbitrary future timestep t+n. This tensor is of shape [N_agents, motion_timesteps, 3], as you might have guessed, 
-        these tracks are gotten from the x, y and z values of the laser_detections from various timesteps. These motion
+        arbitrary future timestep t+n. This tensor is of shape [N_agents, motion_timesteps, 2], as you might have guessed, 
+        these tracks are gotten from the x and y values of the laser_detections from various timesteps. These motion
         tracks do not contain position data of the current timestep, unlike the occupancy map that contains the occupancy
         of the current timestep
 
@@ -51,16 +51,21 @@ class FrameData(DeviceChangeMixin):
 
     bev_road_map: This tensor contains segmentation of road components on the BEV grid. This tensor is of shape 
         [C_map, H_bev, W_bev], whee C_map is the number of channels here.
+
+    ego_trajectory: This tensor contains movement trajectory (waypoints) of ego vehicle in ego vehicle coordinates, The tensor 
+        is of shape [plan_timesteps, 2]. It only has two dimensions because it the trajectory corresponds to movement along the
+        BEV frame, which is a 2D frame
     """
     cam_views: torch.Tensor
     point_cloud: torch.Tensor
     laser_detections: torch.Tensor
     ego_pose: Optional[torch.Tensor]=None
-    cam_intrinsics: Optional[torch.Tensor]=None
+    cam_intrinsic: Optional[torch.Tensor]=None
     cam_extrinsics: Optional[torch.Tensor]=None
     motion_tracks: Optional[torch.Tensor]=None
     occupancy_map: Optional[torch.Tensor]=None
     bev_road_map: Optional[torch.Tensor]=None
+    ego_trajectory: Optional[torch.Tensor]=None
 
 
 @dataclass
@@ -76,11 +81,12 @@ class MultiFrameData(FrameData):
             point_cloud = [],
             laser_detections = [],
             ego_pose = frames[-1].ego_pose,
-            cam_intrinsics = frames[-1].cam_intrinsics,
+            cam_intrinsic = frames[-1].cam_intrinsic,
             cam_extrinsics = frames[-1].cam_extrinsics,
             motion_tracks = frames[-1].motion_tracks,
             occupancy_map = frames[-1].occupancy_map,
-            bev_road_map = frames[-1].bev_road_map
+            bev_road_map = frames[-1].bev_road_map,
+            ego_trajectory = frames[-1].ego_trajectory
         )
 
         for frame_idx in range(0, len(frames)):
@@ -111,26 +117,26 @@ class BatchMultiFrameData(FrameData):
             point_cloud = [],
             laser_detections = [],
             ego_pose = [],
-            cam_intrinsics = [],
+            cam_intrinsic = [],
             cam_extrinsics = [],
             motion_tracks = [],
             occupancy_map = [],
             bev_road_map = [],
+            ego_trajectory = []
         )
 
         for sample_idx in range(0, len(multi_frames)):
             for key in batch_dict:
                 batch_dict[key].append(getattr(multi_frames[sample_idx], key))
         
-
         for key in batch_dict:
             if key == "laser_detections":
                 batch_dict[key] = torch.concat(batch_dict[key], dim=0)
 
-            elif key == "motion_tracks" or key == "occupancy_map":
+            elif key == "motion_tracks" or key == "occupancy_map" or key == "ego_trajectory":
                 batch_dict[key] = torch.nested.nested_tensor(batch_dict[key], layout=torch.jagged)
                 
             else:
-                batch_dict[key] = torch.concat(batch_dict[key], dim=0)
+                batch_dict[key] = torch.stack(batch_dict[key], dim=0)
         
         return cls(**batch_dict)

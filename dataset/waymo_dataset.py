@@ -25,6 +25,7 @@ class WaymoDataset(Dataset):
             data_or_path: Union[str, Dict[str, Any]], 
             motion_horizon: int=12,
             occupancy_horizon: int=5,
+            planning_horizon: int=6,
             bev_map_size: Tuple[int, int]=(200, 200),
             cam_img_size: Tuple[int, int]=(480, 640),
             num_cloud_points: int=100_000,
@@ -34,6 +35,7 @@ class WaymoDataset(Dataset):
         self.data = data_or_path if isinstance(data_or_path, dict) else load_pickle_file(data_or_path)
         self.motion_horizon = motion_horizon
         self.occupancy_horizon = occupancy_horizon
+        self.planning_horizon = planning_horizon
         self.bev_map_size = bev_map_size
         self.cam_img_size = cam_img_size
         self.num_cloud_points = num_cloud_points
@@ -107,30 +109,33 @@ class WaymoDataset(Dataset):
         laser_detections = self._load_laser_labels(frame_dict)
         
         ego_pose = None
-        cam_intrinsics = None,
-        cam_extrinsics = None,
-        motion_tracks = None,
-        occupancy_map = None,
-        bev_road_map = None,
+        cam_intrinsic = None
+        cam_extrinsics = None
+        motion_tracks = None
+        occupancy_map = None
+        bev_road_map = None
+        ego_trajectory = None
         motion_tracks = None
 
         if not is_partial_data:
-            ego_pose, cam_intrinsics, cam_extrinsics = self._load_ego_pose_and_transforms(frame_dict)
+            ego_pose, cam_intrinsic, cam_extrinsics = self._load_ego_pose_and_transforms(frame_dict)
             motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
             occupancy_map = self._generate_occupancy_map(motion_tracks)
             bev_road_map = self._load_bev_road_map(frame_dict)
-            motion_tracks = motion_tracks[:, 1:, :3]
+            ego_trajectory = self._get_planning_trajectory(sample_dict, frame_idx, ego_pose)
+            motion_tracks = motion_tracks[:, 1:, :2]
 
         return FrameData(
             cam_views=cam_views,
             point_cloud=point_cloud,
             ego_pose=ego_pose,
             laser_detections=laser_detections,
-            cam_intrinsics=cam_intrinsics,
+            cam_intrinsic=cam_intrinsic,
             cam_extrinsics=cam_extrinsics,
             motion_tracks=motion_tracks,
             occupancy_map=occupancy_map,
             bev_road_map=bev_road_map,
+            ego_trajectory=ego_trajectory
         )
 
 
@@ -248,20 +253,20 @@ class WaymoDataset(Dataset):
         torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         ego_pose = torch.from_numpy(frame_dict["ego_pose"])
-        cam_intrinsics_dict = frame_dict["camera_proj_matrix"]["intrinsic"]
+        cam_intrinsic_dict = frame_dict["camera_proj_matrix"]["intrinsic"]
         cam_extrinsics_dict = frame_dict["camera_proj_matrix"]["extrinsic"]
-        cam_keys = sorted(list(cam_intrinsics_dict.keys()))
-        cam_intrinsics = []
+        cam_keys = sorted(list(cam_intrinsic_dict.keys()))
+        cam_intrinsic = []
         cam_extrinsics = []
 
         for cam in cam_keys:
-            cam_intrinsics.append(cam_intrinsics_dict[cam])
+            cam_intrinsic.append(cam_intrinsic_dict[cam])
             cam_extrinsics.append(cam_extrinsics_dict[cam])
 
-        cam_intrinsics = torch.from_numpy(np.stack(cam_intrinsics, axis=0))
+        cam_intrinsic = torch.from_numpy(np.stack(cam_intrinsic, axis=0))
         cam_extrinsics = torch.from_numpy(np.stack(cam_extrinsics, axis=0))
         # shape: (4, 4), (3, 3), (4, 4), (4, 4) respectively
-        return ego_pose, cam_intrinsics, cam_extrinsics
+        return ego_pose, cam_intrinsic, cam_extrinsics
 
 
     @check_perf
@@ -273,7 +278,29 @@ class WaymoDataset(Dataset):
             map_img = F.interpolate(map_img[None], size=self.bev_map_size, mode="bilinear")[0]
         return map_img
     
+
+    @check_perf
+    def _get_planning_trajectory(
+        self, 
+        sample_dict: Dict[str, Any],
+        frame_idx: int,
+        ego_pose: torch.Tensor
+    ) -> torch.Tensor:
+        num_samples = len(sample_dict)
+        if frame_idx + 1 == num_samples:
+            return torch.tensor([], dtype=torch.float32)
+        global_positions = [
+            sample_dict[idx]["ego_pose"][:, -1] 
+            for idx in range(frame_idx + 1, min(num_samples, frame_idx + self.planning_horizon + 1))
+        ]
+        global_positions = np.stack(global_positions, axis=0)
+        global_positions = torch.from_numpy(global_positions)
+        ego_positions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
+        # shape: (timesteps, 2)
+        return ego_positions[:, :2]
+        
     
+    @check_perf
     def _get_timestamp(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
         return torch.tensor(frame_dict["timestamp_seconds"], dtype=torch.float32)
     
@@ -281,7 +308,3 @@ class WaymoDataset(Dataset):
     @staticmethod
     def collate_fn(batch: List[MultiFrameData]) -> BatchMultiFrameData:
         return BatchMultiFrameData.from_multiframedata_list(batch)
-        
-
-
-

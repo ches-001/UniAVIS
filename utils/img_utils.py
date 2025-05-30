@@ -129,8 +129,7 @@ def generate_occupancy_map(
         [heading_cos, -heading_sin, heading_sin, heading_cos],
     axis=2).reshape(*motion_tracks.shape[:2], 2, 2)
 
-    vertices = torch.matmul(rotations, torch.permute(relative_xy_corners, (0, 1, 3, 2)))
-    vertices = torch.permute(vertices, (0, 1, 3, 2)) + xy_pos[:, :, None, :]
+    vertices = torch.matmul(relative_xy_corners, rotations.permute(0, 1, 3, 2)) + xy_pos[:, :, None, :]
     vertices = vertices.cpu()
 
     vertices[..., 0] = ((vertices[..., 0] - x_min) / (x_max - x_min)) * (map_size[0] - 1)
