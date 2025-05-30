@@ -46,17 +46,17 @@ def draw_stop_sign_on_map(
         sign_radius: int=5,
     ):
     point = np.asarray([position.x, position.y, position.z, 1])
-    point = (transform @ point[:, None]).T[:, :2]
+    point = (point[None] @ transform.T)[:, :2]
     point = (point - xy_min) / (xy_max - xy_min)
     if point[:, 0] < 0 or point[:, 0] > 1 or point[:, 1] < 0 or point[:, 1] > 1:
         return
-    point[:, 0] *= (map_img.shape[0] - 1)
-    point[:, 1] *= (map_img.shape[1] - 1)
+    point[:, 0] *= (map_img.shape[1] - 1)
+    point[:, 1] *= (map_img.shape[0] - 1)
     point = point[0].astype(int).tolist()
     cv2.circle(map_img, center=point, radius=sign_radius, color=list(color), thickness=-1)
 
 
-def draw_polygon_om_map(
+def draw_polygon_on_map(
         map_img: np.ndarray, 
         polygons: Iterable[map_pb2.MapPoint], 
         transform: np.ndarray,
@@ -74,8 +74,8 @@ def draw_polygon_om_map(
     if not np.any(mask):
         return
     points = points[mask]
-    points[:, 0] *= (map_img.shape[0] - 1)
-    points[:, 1] *= (map_img.shape[1] - 1)
+    points[:, 0] *= (map_img.shape[1] - 1)
+    points[:, 1] *= (map_img.shape[0] - 1)
     points = points.astype(int)
     if fill:
         cv2.fillPoly(map_img, pts=[points], color=color)
@@ -88,29 +88,29 @@ def construct_frame_map(
         pose: dataset_pb2.Transform, 
         xy_min: np.ndarray,
         xy_max: np.ndarray,
-        map_img_size: Tuple[int, int]=(800, 800),
+        map_img_hw: Tuple[int, int],
     ) -> np.ndarray:
     
-    map_img = np.zeros((*map_img_size, 3), dtype=np.uint8)
+    map_img = np.zeros((*map_img_hw, 3), dtype=np.uint8)
     transform = np.linalg.inv(np.reshape(pose.transform, (4, 4)))
-    line_thickness = 2
+    line_thickness = 1
 
     for feature in map_features:
         if feature.HasField("lane"):
             color = LANE_TYPES.get(feature.lane.type, DEFAULT)[0]
-            draw_polygon_om_map(
+            draw_polygon_on_map(
                 map_img, feature.lane.polyline, transform, xy_min, xy_max, color, False, False, line_thickness
             )
 
         elif feature.HasField("road_line"):
             color = ROAD_LINE_TYPES.get(feature.road_line.type, DEFAULT)[0]
-            draw_polygon_om_map(
+            draw_polygon_on_map(
                 map_img, feature.road_line.polyline, transform, xy_min, xy_max, color, False, False, line_thickness
             )
 
         elif feature.HasField("road_edge"):
             color = ROAD_EDGE_TYPES.get(feature.road_edge.type, DEFAULT)[0]
-            draw_polygon_om_map(
+            draw_polygon_on_map(
                 map_img, feature.road_edge.polyline, transform, xy_min, xy_max, color, False, False, line_thickness
             )
 
@@ -120,19 +120,19 @@ def construct_frame_map(
 
         elif feature.HasField("crosswalk"):
             color = CROSSWALK_TYPE[0]
-            draw_polygon_om_map(
+            draw_polygon_on_map(
                 map_img, feature.crosswalk.polygon, transform, xy_min, xy_max, color, True, line_thickness
             )
 
         elif feature.HasField("speed_bump"):
             color = SPEED_BUMP_TYPE[0]
-            draw_polygon_om_map(
+            draw_polygon_on_map(
                 map_img, feature.speed_bump.polygon, transform, xy_min, xy_max, color, True, line_thickness
             )
         
         elif feature.HasField("driveway"):
             color = DRIVEWAY_TYPE[0]
-            draw_polygon_om_map(
+            draw_polygon_on_map(
                 map_img, feature.driveway.polygon, transform, xy_min, xy_max, color, True, line_thickness
             )
     return map_img
@@ -212,7 +212,7 @@ def process_perception_frame(
         buffer = np.frombuffer(image_data.image, dtype=np.uint8)
         img = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (other_kwargs["cam_img_size"][1], other_kwargs["cam_img_size"][0]))
+        img = cv2.resize(img, (other_kwargs["cam_img_hw"][1], other_kwargs["cam_img_hw"][0]))
         camera_views.append(img)
         camera_view_indexes.append(image_data.name)
 
@@ -268,7 +268,7 @@ def process_perception_frame(
 
     xy_min = np.asarray([other_kwargs["xy_range"][0][0], other_kwargs["xy_range"][1][0]])
     xy_max = np.asarray([other_kwargs["xy_range"][0][1], other_kwargs["xy_range"][1][1]])
-    map_img_size = other_kwargs["map_img_size"]
+    map_img_hw = other_kwargs["map_img_hw"]
 
     # camera views
     camera_views = np.stack(camera_views, axis=0)
@@ -285,7 +285,7 @@ def process_perception_frame(
         frame.pose, 
         xy_min=xy_min, 
         xy_max=xy_max, 
-        map_img_size=map_img_size
+        map_img_hw=map_img_hw
     )
     map_img = cv2.cvtColor(map_img, cv2.COLOR_BGR2RGB)
     map_img = np.transpose(map_img, (2, 0, 1))
@@ -490,8 +490,8 @@ if __name__ == "__main__":
     GlobalProcessPoolExecutor = ProcessPoolExecutor(args.max_proc_workers, mp_context=MpContext)
 
     other_kwargs = {
-        "cam_img_size": (args.cam_img_height, args.cam_img_width),
-        "map_img_size": (args.map_img_height, args.map_img_width),
+        "cam_img_hw": (args.cam_img_height, args.cam_img_width),
+        "map_img_hw": (args.map_img_height, args.map_img_width),
         "xy_range": ((args.map_min_x, args.map_max_x), (args.map_min_y, args.map_max_y)),
         "num_laser_points": args.num_laser_points,
     }

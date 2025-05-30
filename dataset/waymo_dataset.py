@@ -26,8 +26,8 @@ class WaymoDataset(Dataset):
             motion_horizon: int=12,
             occupancy_horizon: int=5,
             planning_horizon: int=6,
-            bev_map_size: Tuple[int, int]=(200, 200),
-            cam_img_size: Tuple[int, int]=(480, 640),
+            bev_map_hw: Tuple[int, int]=(200, 200),
+            cam_img_hw: Tuple[int, int]=(480, 640),
             num_cloud_points: int=100_000,
             xyz_range: Optional[List[Tuple[int, int]]] = None,
             frames_per_sample: int=3
@@ -36,8 +36,8 @@ class WaymoDataset(Dataset):
         self.motion_horizon = motion_horizon
         self.occupancy_horizon = occupancy_horizon
         self.planning_horizon = planning_horizon
-        self.bev_map_size = bev_map_size
-        self.cam_img_size = cam_img_size
+        self.bev_map_hw = bev_map_hw
+        self.cam_img_hw = cam_img_hw
         self.num_cloud_points = num_cloud_points
         self.xyz_range = xyz_range or [(-51.2, 51.2), (-51.2, 51.2), (-5.0, 3.0)]
         self.frames_per_sample = frames_per_sample
@@ -186,7 +186,7 @@ class WaymoDataset(Dataset):
         # shape: (num_detections, timesteps, H_bev, W_bev)
         occ_map = generate_occupancy_map(
             motion_tracks[:, :self.occupancy_horizon, :], 
-            map_size=self.bev_map_size,
+            map_hw=self.bev_map_hw,
             x_min=self.xyz_range[0][0],
             x_max=self.xyz_range[0][1],
             y_min=self.xyz_range[1][0],
@@ -201,8 +201,8 @@ class WaymoDataset(Dataset):
         cam_view_path = frame_dict["camera_view_path"]
         cam_views = np.load(cam_view_path)
         cam_views = torch.from_numpy(cam_views) / 255
-        if cam_views.shape[2] != self.cam_img_size[0] or cam_views.shape[3] != self.cam_img_size[1]:
-            cam_views = F.interpolate(cam_views, size=self.cam_img_size, mode="bilinear")
+        if cam_views.shape[2] != self.cam_img_hw[0] or cam_views.shape[3] != self.cam_img_hw[1]:
+            cam_views = F.interpolate(cam_views, size=self.cam_img_hw, mode="bilinear")
         return cam_views
 
     
@@ -274,8 +274,8 @@ class WaymoDataset(Dataset):
         map_img_path = frame_dict["map_img_path"]
         map_img = np.load(map_img_path)
         map_img = torch.from_numpy(map_img) / 255
-        if map_img.shape[1] != self.bev_map_size[0] or map_img.shape[2] != self.bev_map_size[1]:
-            map_img = F.interpolate(map_img[None], size=self.bev_map_size, mode="bilinear")[0]
+        if map_img.shape[1] != self.bev_map_hw[0] or map_img.shape[2] != self.bev_map_hw[1]:
+            map_img = F.interpolate(map_img[None], size=self.bev_map_hw, mode="bilinear")[0]
         return map_img
     
 
