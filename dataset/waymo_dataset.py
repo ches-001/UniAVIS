@@ -26,7 +26,7 @@ class WaymoDataset(Dataset):
             motion_horizon: int=12,
             occupancy_horizon: int=5,
             bev_map_size: Tuple[int, int]=(200, 200),
-            cam_img_size: Tuple[int, int]=(512, 512),
+            cam_img_size: Tuple[int, int]=(480, 640),
             num_cloud_points: int=100_000,
             xyz_range: Optional[List[Tuple[int, int]]] = None,
             frames_per_sample: int=3
@@ -52,7 +52,7 @@ class WaymoDataset(Dataset):
         ], axis=0)
         self._data_len = sum(sample_sizes)
 
-    
+    @check_perf
     def _search_for_idx(self, idx: int) -> Tuple[str, int]:
         op_len = len(self._start_indexes)
         center_idx = op_len // 2
@@ -117,9 +117,9 @@ class WaymoDataset(Dataset):
         if not is_partial_data:
             ego_pose, cam_intrinsics, cam_extrinsics = self._load_ego_pose_and_transforms(frame_dict)
             motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
-            occupancy_map = self._generate_occupancy_map(sample_dict, frame_idx, motion_tracks)
+            occupancy_map = self._generate_occupancy_map(motion_tracks)
             bev_road_map = self._load_bev_road_map(frame_dict)
-            motion_tracks = motion_tracks[..., :3]
+            motion_tracks = motion_tracks[:, 1:, :3]
 
         return FrameData(
             cam_views=cam_views,
@@ -140,10 +140,7 @@ class WaymoDataset(Dataset):
         max_horizon = max(self.motion_horizon, self.occupancy_horizon)
         
         track_maps = {}
-        for step in range(0, max_horizon + 1):
-            idx = frame_idx + step
-            if idx >= num_frames - 1:
-                break
+        for idx in range(frame_idx, min(num_frames, frame_idx + max_horizon + 1)):
             laser_labels_path = sample_dict[idx]["laser_labels_path"]
             laser_labels_list = load_pickle_file(laser_labels_path)
 
@@ -158,7 +155,7 @@ class WaymoDataset(Dataset):
                 ): continue
                 
                 if obj_id not in track_maps:
-                    if step == 0:
+                    if idx == frame_idx:
                         track_maps[obj_id] = []
                     else: continue
                 
@@ -180,22 +177,16 @@ class WaymoDataset(Dataset):
 
     
     @check_perf
-    def _generate_occupancy_map(self, sample_dict: Dict[str, Any], frame_idx: int, motion_tracks: torch.Tensor) -> torch.Tensor:
-        point_clouds = [
-            self._load_point_cloud(
-                sample_dict[idx]
-            ) for idx in range(frame_idx, frame_idx + self.occupancy_horizon + 1)
-        ]
-        point_clouds = torch.stack(point_clouds, dim=0)
+    def _generate_occupancy_map(self, motion_tracks: torch.Tensor) -> torch.Tensor:
         # shape: (num_detections, timesteps, H_bev, W_bev)
         occ_map = generate_occupancy_map(
             motion_tracks[:, :self.occupancy_horizon, :], 
-            point_clouds, 
             map_size=self.bev_map_size,
             x_min=self.xyz_range[0][0],
             x_max=self.xyz_range[0][1],
             y_min=self.xyz_range[1][0],
             y_max=self.xyz_range[1][1],
+            point_clouds=None
         )
         return occ_map
 

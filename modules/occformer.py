@@ -201,11 +201,9 @@ class OccFormer(nn.Module):
 
         Returns
         --------------------------------
-        :occupancies: (N, T_o, max_num_agents, H_bev, W_bev) if last_t=False else (N, max_num_agents, H_bev, W_bev) 
-                    the future occupancy map for multiple agents (where T_o = pred_horizon or num_layers).
-                    **NOTE**: During inference, only the prediction at the last timestep is relevant, this is
-                    because a given timestep t contains the occupancy at that timestep and all of the previous
-                    timesteps
+        :occupancies: (N, max_num_agents, T_o, H_bev, W_bev)
+            the future occupancy map for multiple agents (where T_o = pred_horizon or num_layers).
+                   
         """
 
         assert track_queries.shape[1] == motion_queries.shape[1] and motion_queries.shape[1] == self.max_num_agents
@@ -241,17 +239,13 @@ class OccFormer(nn.Module):
                 mask_features=mask_features,
             )
             
-            if self.training or (not self.training and tidx == self.num_layers - 1):
-                occ_features = self.occ_features_mlp(mask_features)
-                proba_map    = self.conv_transpose(dense_features)
-                proba_map    = proba_map.permute(0, 2, 1, 3).reshape(batch_size, -1, self.embed_dim)
-                occupancy    = torch.matmul(occ_features, proba_map.permute(0, 2, 1))
-                occupancy    = occupancy.permute(0, 2, 1)
-                occupancy    = occupancy.reshape(batch_size, self.max_num_agents, *self.bev_feature_hw)
-                if self.training:
-                    occupancies.append(occupancy)
-                else:
-                    return occupancy
+            occ_features = self.occ_features_mlp(mask_features)
+            proba_map    = self.conv_transpose(dense_features)
+            proba_map    = proba_map.permute(0, 2, 1, 3).reshape(batch_size, -1, self.embed_dim)
+            occupancy    = torch.matmul(occ_features, proba_map.permute(0, 2, 1))
+            occupancy    = occupancy.permute(0, 2, 1)
+            occupancy    = occupancy.reshape(batch_size, self.max_num_agents, *self.bev_feature_hw)
+            occupancies.append(occupancy)
 
-        occupancies = torch.stack(occupancies, dim=1)
+        occupancies = torch.stack(occupancies, dim=2)
         return occupancies

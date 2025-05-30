@@ -41,11 +41,13 @@ class FrameData(DeviceChangeMixin):
 
     motion_tracks: This tensor contains the movement trajectory of dynamic agents in a given frame from timestep t to an
         arbitrary future timestep t+n. This tensor is of shape [N_agents, motion_timesteps, 3], as you might have guessed, 
-        these tracks are gotten from the x, y and z values of the laser_detections from various timesteps.
+        these tracks are gotten from the x, y and z values of the laser_detections from various timesteps. These motion
+        tracks do not contain position data of the current timestep, unlike the occupancy map that contains the occupancy
+        of the current timestep
 
     occupancy_map: This tensor contains the future occupancy of dynamic agents on a BEV (Bird Eye View) grid map. 
         The tensor is of shape [N_agents, occ_timesteps, H_bev, W_bev], where H_bev and W_bev are the height and width 
-        of the BEV grid
+        of the BEV grid. This map contains the occupancy of the current timestep as the first map
 
     bev_road_map: This tensor contains segmentation of road components on the BEV grid. This tensor is of shape 
         [C_map, H_bev, W_bev], whee C_map is the number of channels here.

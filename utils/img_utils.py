@@ -1,7 +1,7 @@
 import cv2
 import torch
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Optional
 
 def point_clouds_to_binary_bev_maps(
         point_clouds: torch.Tensor, 
@@ -11,9 +11,31 @@ def point_clouds_to_binary_bev_maps(
         y_min: float=-51.2,
         y_max: float=51.2,
     ) -> torch.Tensor:
-
     """
-    point_clouds shape: (batch_size, num_points, D)
+    Inputs
+    --------------------------------
+    :point_clouds: 
+        shape: (batch_size, num_points, D) | (num_points, D)
+
+    :map_size:
+        BEV (Bird Eye View) 2D size
+
+    :x_min:
+        minimum value along the x-axis of Ego vehicle frame
+
+    :x_max:
+        maximum value along the x-axis of Ego vehicle frame
+
+    :y_min:
+        minimum value along the y-axis of Ego vehicle frame
+
+    :y_max:
+        maximum value along the y-axis of Ego vehicle frame
+
+    Returns
+    --------------------------------
+    :detection agonistic binary BEV map:
+        shape: (batch_size, bev_H, bev_W) | (bev_H, bev_W)
     """
 
     ndim = point_clouds.ndim
@@ -48,21 +70,46 @@ def point_clouds_to_binary_bev_maps(
 
 def generate_occupancy_map(
         motion_tracks: torch.Tensor,
-        point_clouds: torch.Tensor,
         map_size: Tuple[int, int], 
         x_min: float=-51.2,
         x_max: float=51.2,
         y_min: float=-51.2,
         y_max: float=51.2,
+        point_clouds: Optional[torch.Tensor]=None
     ) -> torch.Tensor:
     
     """
-    motion_tracks shape: (num_detections, timesteps, 8)
+    Inputs
+    --------------------------------
+    :motion_tracks: 
+        shape: (num_detections, num_timesteps, D)
 
-    point_clouds shape: (timesteps, num_points, D)
+    :map_size:
+        BEV (Bird Eye View) 2D size
+
+    :x_min:
+        minimum value along the x-axis of Ego vehicle frame
+
+    :x_max:
+        maximum value along the x-axis of Ego vehicle frame
+
+    :y_min:
+        minimum value along the y-axis of Ego vehicle frame
+
+    :y_max:
+        maximum value along the y-axis of Ego vehicle frame
+
+    :point_clouds (optional): 
+        shape: (num_timesteps, num_points, D). If provided, it will be used to compute a detection 
+        instance agonistic binary occupancy map which will serve as a mask to be applied to the detection
+        level occupancy map made from the bounding box data of each agent across various timesteps from the
+        motion tracks.
+
+    Returns
+    --------------------------------
+    :detection instance level binary BEV map:
+        shape: (num_detections, num_timesteps, bev_H, bev_W)
     """
-
-    assert motion_tracks.device == point_clouds.device
     xy_pos = motion_tracks[..., :2]
 
     num_dets, num_timesteps = motion_tracks.shape[:2]
@@ -73,6 +120,7 @@ def generate_occupancy_map(
         torch.stack([+motion_tracks[..., 3], +motion_tracks[..., 4]], dim=2),
         torch.stack([-motion_tracks[..., 3], +motion_tracks[..., 4]], dim=2)
     ], dim=2)
+    relative_xy_corners /= 2
 
     heading_angles = motion_tracks[..., -1]
     heading_cos = torch.cos(heading_angles)
@@ -87,30 +135,32 @@ def generate_occupancy_map(
 
     vertices[..., 0] = ((vertices[..., 0] - x_min) / (x_max - x_min)) * (map_size[0] - 1)
     vertices[..., 1] = ((vertices[..., 1] - y_min) / (y_max - y_min)) * (map_size[1] - 1)
-    vertices = vertices.cpu().to(dtype=torch.int64)
 
-    occ_maps = torch.zeros((*motion_tracks.shape[:2], *map_size), dtype=torch.uint8)
-
-    binary_occ_maps = point_clouds_to_binary_bev_maps(
-        point_clouds, 
-        map_size, 
-        x_min=x_min,
-        x_max=x_max,
-        y_min=y_min,
-        y_max=y_max,
-    )
-    binary_occ_maps = binary_occ_maps.cpu()
+    vertices = vertices.cpu().to(dtype=torch.int64).numpy()
+    occ_maps = np.zeros((*motion_tracks.shape[:2], *map_size), dtype=np.uint8)
 
     # TODO: This block of code needs optimization
     for tidx in range(0, num_timesteps):
-        binary_occ_map = binary_occ_maps[tidx]
         for didx in range(0, num_dets):
-            v = vertices[didx, tidx].cpu().numpy()
+            v = vertices[didx, tidx]
             if np.any(v < 0) or np.any((v[..., 0] >= map_size[0]) | (v[..., 1] >= map_size[1])):
                 continue
-            occ_map = cv2.fillPoly(occ_maps[didx, tidx].cpu().numpy(), pts=[v], color=1)
-            occ_map = torch.from_numpy(occ_map)
-            occ_maps[didx, tidx] = occ_map * binary_occ_map
-    occ_maps = occ_maps.cumsum(dim=1).clamp(min=0, max=1)
+            occ_map = cv2.fillPoly(occ_maps[didx, tidx], pts=[v], color=1)
+            occ_maps[didx, tidx] = occ_map
+
+    occ_maps = occ_maps
+    occ_maps = torch.from_numpy(occ_maps)
+    # occ_maps = occ_maps.cumsum(dim=1).clamp(min=0, max=1)
+
+    if point_clouds is not None:
+        binary_occ_maps = point_clouds_to_binary_bev_maps(
+            point_clouds, 
+            map_size, 
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+        ).cpu()
+        occ_maps *= binary_occ_maps[None]
     return occ_maps
     
