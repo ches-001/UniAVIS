@@ -172,7 +172,6 @@ class WaymoDataset(Dataset):
                     obj_3d_bbox["width"],
                     obj_3d_bbox["height"],
                     obj_3d_bbox["heading"],
-                    obj_type
                 ]
                 track_maps[obj_id].append(obj_det)
         # NOTE: Nested tensors is experimental feature and may change behaviour in the future

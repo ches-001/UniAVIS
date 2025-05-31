@@ -126,17 +126,17 @@ def generate_occupancy_map(
     heading_cos = torch.cos(heading_angles)
     heading_sin = torch.sin(heading_angles)
     rotations = torch.stack(
-        [heading_cos, -heading_sin, heading_sin, heading_cos],
+        [heading_cos, heading_sin, -heading_sin, heading_cos],
     axis=2).reshape(*motion_tracks.shape[:2], 2, 2)
 
-    vertices = torch.matmul(relative_xy_corners, rotations.permute(0, 1, 3, 2)) + xy_pos[:, :, None, :]
+    vertices = torch.matmul(relative_xy_corners, rotations) + xy_pos[:, :, None, :]
     vertices[..., 0] = ((vertices[..., 0] - x_min) / (x_max - x_min)) * (map_hw[1] - 1)
     vertices[..., 1] = ((vertices[..., 1] - y_min) / (y_max - y_min)) * (map_hw[0] - 1)
 
     vertices = vertices.cpu().to(dtype=torch.int64).numpy()
     occ_maps = np.zeros((*motion_tracks.shape[:2], *map_hw), dtype=np.uint8)
 
-    # TODO: This block of code needs optimization
+    # TODO: This block of code might needs optimization
     for tidx in range(0, num_timesteps):
         for didx in range(0, num_dets):
             v = vertices[didx, tidx]
@@ -147,8 +147,7 @@ def generate_occupancy_map(
 
     occ_maps = occ_maps
     occ_maps = torch.from_numpy(occ_maps)
-    # occ_maps = occ_maps.cumsum(dim=1).clamp(min=0, max=1)
-
+    
     if point_clouds is not None:
         binary_occ_maps = point_clouds_to_binary_bev_maps(
             point_clouds, 
