@@ -1,3 +1,3 @@
-# Pytorch based Unified Autonomous Driving Framework
+# UniAVIS: Unified Autonomous Vehicle Intelligence System
 
 ## Under Development!
