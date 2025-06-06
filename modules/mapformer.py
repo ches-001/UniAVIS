@@ -10,7 +10,7 @@ from .common import (
     AddNorm
 )
 from .attentions import DeformableAttention, MultiHeadedAttention
-from typing import *
+from typing import Optional, Tuple, Union
 
 
 class VectorMapKeypointDecoderLayer(TrackFormerDecoderLayer):

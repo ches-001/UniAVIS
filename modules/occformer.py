@@ -10,7 +10,7 @@ from .common import (
     SimpleMLP
 )
 from .attentions import MultiHeadedAttention
-from typing import *
+from typing import Tuple
 
 
 class OccFormerDecoderLayer(nn.Module):

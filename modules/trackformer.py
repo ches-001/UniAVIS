@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from .base import BaseFormer
 from .attentions import MultiHeadedAttention, DeformableAttention
 from .common import AddNorm, PosEmbedding1D, DetectionHead, SimpleMLP
-from typing import *
+from typing import Optional, Tuple
 
 
 class TrackFormerDecoderLayer(nn.Module):

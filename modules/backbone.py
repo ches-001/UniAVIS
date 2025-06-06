@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision.models import resnet
-from typing import *
+from typing import Optional, Type, Union, Tuple, List
 
 
 class ResNetBackBone(resnet.ResNet):
@@ -10,7 +10,7 @@ class ResNetBackBone(resnet.ResNet):
         in_channels: int, 
         out_channels: int,
         block: Union[str, Type]=resnet.BasicBlock, 
-        block_layers: Optional[Iterable[int]]=None
+        block_layers: Optional[Tuple[int, int, int, int]]=None
     ):
         if isinstance(block, str):
             block = getattr(resnet, block)

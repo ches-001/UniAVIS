@@ -3,7 +3,7 @@ import torch.nn as nn
 from .base import BaseFormer
 from .common import PosEmbedding1D, PosEmbedding2D, SimpleMLP, AddNorm
 from .attentions import MultiHeadedAttention, DeformableAttention
-from typing import *
+from typing import Tuple
 
 
 class PlanFormerDecoderLayer(nn.Module):

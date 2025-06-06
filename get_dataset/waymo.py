@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from waymo_open_dataset import dataset_pb2
 from waymo_open_dataset.protos import map_pb2
 from waymo_open_dataset.utils.frame_utils import convert_range_image_to_point_cloud
-from utils.io_utils import delete_path, save_json_file, save_pickle_file
+from utils.io_utils import delete_path, save_pickle_file
 from typing import Dict, Any, Callable, Optional, Tuple, Iterable
 from constants import *
 

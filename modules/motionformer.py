@@ -3,7 +3,7 @@ import torch.nn as nn
 from .base import BaseFormer
 from .common import AddNorm, PosEmbedding1D, SpatialSinusoidalPosEmbedding, SimpleMLP
 from .attentions import MultiHeadedAttention, DeformableAttention
-from typing import *
+from typing import Tuple
 
 
 class MotionFormerDecoderLayer(nn.Module):

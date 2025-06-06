@@ -2,7 +2,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import *
+from typing import Optional, Tuple, Union
+
 
 class ConvBNorm(nn.Module):
     def __init__(
