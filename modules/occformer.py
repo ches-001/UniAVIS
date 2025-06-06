@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from .base import BaseFormer
 from .common import (
     AddNorm, 
     ConvBNorm, 
@@ -89,14 +90,14 @@ class OccFormerDecoderLayer(nn.Module):
         out2              = self.addnorm1(ds_dense_features, out1)
         mask              = torch.matmul(out2, mask_features.permute(0, 2, 1))
         out3              = self.cross_attention(out2, agent_features, agent_features, attention_mask=mask)
-        out4              = self.addnorm1(out2, out3)
+        out4              = self.addnorm1((out2 * mask), out3)
         out4              = out4.permute(0, 2, 1)
         out4              = out4.reshape(batch_size, self.embed_dim, *ds_shape)
         out5              = self.upsampler(out4) + dense_features
         return out5
 
 
-class OccFormer(nn.Module):
+class OccFormer(BaseFormer):
     def __init__(
             self, 
             num_heads: int, 

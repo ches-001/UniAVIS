@@ -14,7 +14,7 @@ class DotProductAttention(nn.Module):
             Q: torch.Tensor,
             K: torch.Tensor,
             V: torch.Tensor,
-            padding_mask: Optional[torch.BoolTensor]=None,
+            padding_mask: Optional[torch.Tensor]=None,
             attention_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
         """
@@ -41,60 +41,64 @@ class DotProductAttention(nn.Module):
         attn   = torch.matmul(Q, K_T) / math.sqrt(K.shape[-1])
 
         if torch.is_tensor(padding_mask):
-            padding_mask = padding_mask[..., None]
+            if (attn.ndim - padding_mask.ndim) == 1:
+                padding_mask = padding_mask[..., None]
             assert attn.ndim == padding_mask.ndim
             attn = attn.masked_fill(~padding_mask, -torch.inf)
             
         if torch.is_tensor(attention_mask):
             assert attn.ndim == attention_mask.ndim
-            if isinstance(attention_mask, torch.BoolTensor):
+            if attention_mask.dtype == torch.bool:
                 attn = attn.masked_fill(~attention_mask, -torch.inf)
             else:
                 attn = attn * attention_mask
         
-        attn        = F.softmax(attn, dim=-1)
-        output      = torch.matmul(attn, V)
+        attn   = F.softmax(attn, dim=-1)
+        # address NaN values that could be caused by combination of casual mask and padding mask
+        attn   = attn.masked_fill(torch.isnan(attn), 0)
+        output = torch.matmul(attn, V)
         return output
     
 
 class MultiHeadedAttention(nn.Module):
-    def __init__(self, num_heads: int, embed_dim: int, dropout: float=0.1):
+    def __init__(self, num_heads: int, embed_dim: int, dropout: float=0.1, proj_bias: bool=False):
         super(MultiHeadedAttention, self).__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by n_head"
         
-        self.num_heads   = num_heads
-        self.embed_dim = embed_dim
-        self.dropout   = dropout
-        self.head_dim  = self.embed_dim // self.num_heads
+        self.num_heads      = num_heads
+        self.embed_dim      = embed_dim
+        self.dropout        = dropout
+        self.head_dim       = self.embed_dim // self.num_heads
+        self.proj_bias      = proj_bias
                 
-        self.Q_fc = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.K_fc = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.V_fc = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+        self.Q_fc = nn.Linear(self.embed_dim, self.embed_dim, bias=self.proj_bias)
+        self.K_fc = nn.Linear(self.embed_dim, self.embed_dim, bias=self.proj_bias)
+        self.V_fc = nn.Linear(self.embed_dim, self.embed_dim, bias=self.proj_bias)
         
         self.attention     = DotProductAttention()
-        self.fc            = nn.Linear(self.embed_dim, self.embed_dim)
+        self.fc            = nn.Linear(self.embed_dim, self.embed_dim, bias=self.proj_bias)
         self.dropout_layer = nn.Dropout(self.dropout)
 
     def forward(self, 
                 Q: torch.Tensor,
                 K: torch.Tensor, 
                 V: torch.Tensor,
-                padding_mask: Optional[torch.BoolTensor]=None,
+                padding_mask: Optional[torch.Tensor]=None,
                 attention_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
 
         """
         Input
         --------------------------------
-        :Q: (N, query_len, embed_dim), attention queries, where N = batch_size
+        :Q: (N, ..., query_len, embed_dim), attention queries, where N = batch_size
         
-        :K: (N, key_len, embed_dim), attention keys
+        :K: (N, ..., key_len, embed_dim), attention keys
 
-        :V: (N, value_len, embed_dim), attention values
+        :V: (N, ..., value_len, embed_dim), attention values
 
-        :padding_mask: (N, query_len), padding mask (0 if padding, else 1)
+        :padding_mask: (N, ..., query_len) | (N, ..., query_len, 1), padding mask (0 if padding, else 1)
 
-        :attention_mask: (N, query_len, key_len), attention mask (0 if not attended to, else 1)
+        :attention_mask: (N, ..., query_len, key_len), attention mask (0 if not attended to, else 1)
 
         Returns
         --------------------------------
@@ -104,28 +108,38 @@ class MultiHeadedAttention(nn.Module):
         assert Q.shape[-1] % self.num_heads == 0
         assert K.shape[-1] % self.num_heads == 0
         assert V.shape[-1] % self.num_heads == 0
+        assert Q.ndim == K.ndim and K.ndim == V.ndim
         
-        N, _, _ = Q.shape
+        orig_shape = Q.shape
+        ndim       = Q.ndim
         
         Q = self.Q_fc(Q)
         K = self.K_fc(K)
         V = self.V_fc(V)
         
-        Q = Q.reshape(N, Q.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        K = K.reshape(N, K.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        V = V.reshape(N, V.shape[1], self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        unperm_axes = [i for i in range(0, Q.ndim - 2)]
+        Q = Q.reshape(orig_shape[0], *Q.shape[1:-1], self.num_heads, self.head_dim).permute(*unperm_axes, -2, -3, -1)
+        K = K.reshape(orig_shape[0], *K.shape[1:-1], self.num_heads, self.head_dim).permute(*unperm_axes, -2, -3, -1)
+        V = V.reshape(orig_shape[0], *V.shape[1:-1], self.num_heads, self.head_dim).permute(*unperm_axes, -2, -3, -1)
         
         if padding_mask is not None:
-            padding_mask   = padding_mask[:, None]
+            padding_mask = padding_mask[(slice(None), ) * (ndim - 2) + (None, )]
 
         if attention_mask is not None:
-            attention_mask = attention_mask[:, None]
+            attention_mask = attention_mask[(slice(None), ) * (ndim - 2) + (None, )]
 
         output = self.attention(Q, K, V, padding_mask, attention_mask)
-        output = output.permute(0, 2, 1, 3)
-        output = output.reshape(N, -1, self.embed_dim)
+        output = output.permute(*unperm_axes, -2, -3, -1)
+        output = output.reshape(*orig_shape)
         
         output = self.fc(output)
+
+        if self.fc.bias is not None and padding_mask is not None:
+            padding_mask = torch.flatten(padding_mask, start_dim=ndim-2, end_dim=ndim-1)
+            if padding_mask.ndim < output.ndim:
+                padding_mask = padding_mask[..., None]
+            output = torch.masked_fill(output, ~padding_mask, value=0.0)
+
         output = self.dropout_layer(output)
         return output
     
@@ -226,7 +240,10 @@ class DeformableAttention(nn.Module):
 
         if attention_mask is not None:
             attention_mask = attention_mask[:, :, None, :, None]
-            attn = attn.masked_fill(~attention_mask, value=0)
+            if attention_mask.dtype == torch.bool:
+                attn = attn.masked_fill(~attention_mask, value=0)
+            else:
+                attn = attn * attention_mask
             
         # attn shape: (N, num_heads, num_fmap_levels, query_len, num_ref_points)
         attn        = attn.permute(0, 2, 3, 1, 4)
@@ -269,7 +286,6 @@ class DeformableAttention(nn.Module):
         output = output.reshape(batch_size, self.embed_dim, query_len, self.num_ref_points)
         output = output.permute(0, 2, 1, 3).sum(dim=-1)
         output = self.out_fc(output)
-
         return output
     
     @staticmethod
@@ -423,7 +439,10 @@ class MultiView3DDeformableAttention(DeformableAttention):
         )
         if attention_mask is not None:
             attention_mask = attention_mask[:, :, None, :, :, None, :]
-            attn = attn.masked_fill(~attention_mask, value=0)
+            if attention_mask.dtype == torch.bool:
+                attn = attn.masked_fill(~attention_mask, value=0)
+            else:
+                attn = attn * attention_mask
 
         # attn shape: (batch_size, num_heads, num_views, num_fmap_levels, query_len, num_ref_points, num_z_ref_points)
         attn        = attn.permute(0, 2, 3, 4, 1, 5, 6)
@@ -471,7 +490,6 @@ class MultiView3DDeformableAttention(DeformableAttention):
         output = output.reshape(batch_size, query_len, num_views, self.embed_dim, all_points)
         output = output.sum(dim=(2, -1))
         output = self.out_fc(output)
-
         return output
 
 

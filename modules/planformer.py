@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from .base import BaseFormer
 from .common import PosEmbedding1D, PosEmbedding2D, SimpleMLP, AddNorm
 from .attentions import MultiHeadedAttention, DeformableAttention
 from typing import *
@@ -83,7 +84,7 @@ class PlanFormerDecoderLayer(nn.Module):
         return out5
 
 
-class PlanFormer(nn.Module):
+class PlanFormer(BaseFormer):
     def __init__(
             self,
             num_heads: int, 
@@ -114,22 +115,9 @@ class PlanFormer(nn.Module):
         self.learnable_pe         = learnable_pe
         self.bev_feature_hw    = bev_feature_hw
         
-        self.commands_emb         = PosEmbedding1D(
-            self.num_commands, 
-            embed_dim=self.embed_dim, 
-            learnable=learnable_pe
-        )
-        self.plan_pos_emb         = PosEmbedding1D(
-            1, 
-            embed_dim=self.embed_dim, 
-            learnable=learnable_pe
-        )
-        self.bev_pos_emb          = PosEmbedding2D(
-            x_dim=self.bev_feature_hw[1], 
-            y_dim=self.bev_feature_hw[0], 
-            embed_dim=self.embed_dim, 
-            learnable=False
-        )
+        self.commands_emb         = PosEmbedding1D(self.num_commands, embed_dim=self.embed_dim, learnable=learnable_pe)
+        self.plan_pos_emb         = PosEmbedding1D(1, embed_dim=self.embed_dim, learnable=learnable_pe)
+        self.bev_pos_emb          = PosEmbedding2D(*self.bev_feature_hw, embed_dim=self.embed_dim, learnable=False)
         self.plan_queries_mlp     = SimpleMLP(
             self.embed_dim, 
             self.embed_dim, 

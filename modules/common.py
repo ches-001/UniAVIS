@@ -107,16 +107,30 @@ class AddNorm(nn.Module):
 
 
 class PosEmbedding1D(nn.Module):
-    def __init__(self, seq_len: int, embed_dim: int, learnable: bool=False, _n: int=10000):
+    def __init__(
+            self, 
+            seq_len: int, 
+            embed_dim: int, 
+            learnable: bool=False, 
+            padding_idx: Optional[int]=None, 
+            _n: int=10000
+        ):
         super(PosEmbedding1D, self).__init__()
 
-        self.seq_len   = seq_len
-        self.embed_dim = embed_dim
-        self.learnable = learnable
-        self._n        = _n
+        assert padding_idx is None or padding_idx < seq_len
+
+        self.seq_len     = seq_len
+        self.embed_dim   = embed_dim
+        self.learnable   = learnable
+        self.padding_idx = padding_idx
+        self._n          = _n
 
         if self.learnable:
-            self.pos_emb_module = nn.Embedding(seq_len, embedding_dim=self.embed_dim)
+            self.pos_emb_module = nn.Embedding(
+                seq_len, 
+                embedding_dim=self.embed_dim, 
+                padding_idx=self.padding_idx
+            )
 
         else:
             pos                    = torch.arange(0, self.seq_len, dtype=torch.float32)
@@ -131,41 +145,63 @@ class PosEmbedding1D(nn.Module):
             pos_embs[:, odd_mask]  = torch.cos(
                 pos[:, None] / (self._n ** (2 * ((pos_embs[:, odd_mask] - 1) / 2) / self.embed_dim))
             )
+            if padding_idx is not None:
+                pos_embs[padding_idx] = pos_embs[padding_idx].fill_(0)
 
             self.register_buffer("pos_embs", pos_embs)
 
-    def forward(self) -> torch.Tensor:
+    def forward(self, indexes: Optional[torch.Tensor]=None) -> torch.Tensor:
         """
+        Inputs
+        --------------------------------
+        :indexes: (N, seq_len). The sequence of indexes to embed (if provided)
+
         Returns
         --------------------------------
-        :output: (1, seq_len, embed_dim)
+        :output: (1 | N, max_seq_len | seq_len, embed_dim)
         """
         if self.learnable:
             device   = self.pos_emb_module.weight.device
-            pos      = torch.arange(0, self.seq_len, device=device)
-            pos_embs = self.pos_emb_module(pos[None])
+            if indexes is None:
+                indexes = torch.arange(0, self.seq_len, device=device)[None]
+            pos_embs = self.pos_emb_module(indexes)
+
         else:
-            pos_embs = self.pos_embs[None]
+            if indexes is None:
+                pos_embs = self.pos_embs[None]
+            else:
+                pos_embs = self.pos_embs[indexes]
         return pos_embs
 
 
 class PosEmbedding2D(nn.Module):
-    def __init__(self, x_dim: int, y_dim: int, embed_dim: int, learnable: bool=False, _n: int=10000):
+    def __init__(
+            self, 
+            y_dim: int, 
+            x_dim: int, 
+            embed_dim: int, 
+            learnable: bool=False, 
+            padding_idx: Optional[int]=None, 
+            _n: int=10000
+        ):
         super(PosEmbedding2D, self).__init__()
 
-        self.x_dim     = x_dim
-        self.y_dim     = y_dim
-        self.embed_dim = embed_dim
-        self.learnable = learnable
-        self._n        = _n
+        assert padding_idx is None or padding_idx < min(x_dim, y_dim)
+
+        self.y_dim       = y_dim
+        self.x_dim       = x_dim
+        self.embed_dim   = embed_dim
+        self.learnable   = learnable
+        self.padding_idx = padding_idx
+        self._n          = _n
 
         if self.learnable:
             # instead of having a single positional embedding module to embed BEV_H x BEV_W positional tokens
             # it seems better to have two positional embedding modules, one for each axis. This way, the number 
             # of parameters for positional embedding decreases drastically (from more than 10million to 100k+).
             # while also achieving the desired goal.
-            self.x_pos_emb_module = nn.Embedding(x_dim, embedding_dim=self.embed_dim)
-            self.y_pos_emb_module = nn.Embedding(y_dim, embedding_dim=self.embed_dim)
+            self.x_pos_emb_module = nn.Embedding(x_dim, embedding_dim=self.embed_dim, padding_idx=self.padding_idx)
+            self.y_pos_emb_module = nn.Embedding(y_dim, embedding_dim=self.embed_dim, padding_idx=self.padding_idx)
 
         else:
             x_pos                    = torch.arange(0, self.x_dim, dtype=torch.float32)
@@ -190,32 +226,69 @@ class PosEmbedding2D(nn.Module):
                 y_pos[:, None] / (self._n ** (2 * ((y_pos_embs[:, odd_mask] - 1) / 2) / self.embed_dim))
             )
 
+            if padding_idx is not None:
+                x_pos_embs[padding_idx] = x_pos_embs[padding_idx].fill_(0)
+                y_pos_embs[padding_idx] = y_pos_embs[padding_idx].fill_(0)
+                
             self.register_buffer("x_pos_embs", x_pos_embs)
             self.register_buffer("y_pos_embs", y_pos_embs)
 
-    def forward(self, flatten: bool=False) -> torch.Tensor:
+    def forward(
+            self,  
+            y_indexes: Optional[torch.Tensor]=None,
+            x_indexes: Optional[torch.Tensor]=None,
+            flatten: bool=False
+        ) -> torch.Tensor:
         """
         Input
         --------------------------------
+        :x_indexes: (N, seq_len_x), a sequence of indexes along the x / horizontal / column dimension
+
+        :y_indexes: (N, seq_len_y), a sequence of indexes along the y / vertical / row dimension
+        
         :flatten: if True, reshape embeddings from shape (1, num_embed, H, W) to (1, H * W, num_embed)
 
         Returns
         --------------------------------
         :output: (1, num_embed, H, W) or (1, H * W, num_embed), (where: H = y_dim, X = x_dim)
         """
-        if self.learnable:
-            device        = self.x_pos_emb_module.weight.device
-            x_pos         = torch.arange(0, self.x_dim, device=device)
-            y_pos         = torch.arange(0, self.y_dim, device=device)
-            x_pos_embs    = self.x_pos_emb_module(x_pos[None])
-            y_pos_embs    = self.y_pos_emb_module(y_pos[None])
-        else:
-            x_pos_embs    = self.x_pos_embs[None]
-            y_pos_embs    = self.y_pos_embs[None]
+        if y_indexes is not None and x_indexes is not None:
+            assert y_indexes.ndim == x_indexes.ndim and y_indexes.ndim >= 2
+            assert (
+                y_indexes.shape[0] == 1 
+                or x_indexes.shape[0] == 1
+                or y_indexes.shape[0] == x_indexes.shape[0]
+            )
 
-        x_pos_embs    = x_pos_embs.permute(0, 2, 1)[:, :, None, :]
-        y_pos_embs    = y_pos_embs.permute(0, 2, 1)[:, :, :, None]
-        embs          = x_pos_embs + y_pos_embs    
+        if self.learnable:
+            device = self.x_pos_emb_module.weight.device
+
+            if x_indexes is None:
+                x_indexes = torch.arange(0, self.x_dim, device=device)[None]
+
+            if y_indexes is None:
+                y_indexes = torch.arange(0, self.y_dim, device=device)[None]
+
+            x_pos_embs = self.x_pos_emb_module(x_indexes)
+            y_pos_embs = self.y_pos_emb_module(y_indexes)
+
+        else:
+            if x_indexes is None:
+                x_pos_embs = self.x_pos_embs[None]
+            else:
+                x_pos_embs = self.x_pos_embs[x_indexes]
+
+            if y_indexes is None:
+                y_pos_embs = self.y_pos_embs[None]
+            else:
+                y_pos_embs = self.y_pos_embs[y_indexes]
+
+
+        x_unperm_axes = [i for i in range(0, x_pos_embs.ndim - 2)]
+        y_unperm_axes = [i for i in range(0, y_pos_embs.ndim - 2)]
+        x_pos_embs = x_pos_embs.permute(*x_unperm_axes, -1, -2)[..., None, :]
+        y_pos_embs = y_pos_embs.permute(*y_unperm_axes, -1, -2)[..., None]
+        embs       = x_pos_embs + y_pos_embs    
 
         if flatten:
             embs = embs.permute(0, 2, 3, 1).reshape(1, -1, embs.shape[1])
@@ -232,49 +305,48 @@ class SpatialSinusoidalPosEmbedding(nn.Module):
         """
         Input
         --------------------------------
-        :x: (N, ..., 2) batch of raw x and y spatial coordinates
+        :x: (N, ..., 2) batch of raw x and y or y and x spatial coordinates
 
         Returns
         --------------------------------
         :output: (N, ..., embed_dim)
         """
-        input_og_shape           = input.shape
-        input                    = input.reshape(input_og_shape[0], -1, input_og_shape[-1])
+        orig_shape               = input.shape
+        input                    = input.reshape(orig_shape[0], -1, orig_shape[-1])
         axis_embed_dim           = self.embed_dim // input.shape[-1]
         vec_pos                  = torch.arange(0, axis_embed_dim, device=input.device, dtype=torch.float32)
         even_mask                = (vec_pos % 2) == 0
         odd_mask                 = ~even_mask
-        vec_pos                  = vec_pos[None, None, :].tile(*input.shape[:-1], 1)
+        vec_pos                  = vec_pos[((None,) * (input.ndim - 1)) + (slice(None),)].tile(*input.shape[:-1], 1)
         x_embs                   = torch.zeros(*input.shape[:-1], axis_embed_dim, device=input.device)
         y_embs                   = torch.zeros(*input.shape[:-1], axis_embed_dim, device=input.device)
         x_embs[..., even_mask]   = torch.sin(
             input[..., 0, None] / (self._n ** (2 * (vec_pos[..., even_mask] / 2) / self.embed_dim))
         )
         x_embs[..., odd_mask]      = torch.cos(
-            input[..., 1, None] / (self._n ** (2 * ((vec_pos[..., odd_mask] - 1) / 2) / self.embed_dim))
+            input[..., 0, None] / (self._n ** (2 * ((vec_pos[..., odd_mask] - 1) / 2) / self.embed_dim))
         )
         y_embs[..., even_mask]   = torch.sin(
-            input[..., 0, None] / (self._n ** (2 * (vec_pos[..., even_mask] / 2) / self.embed_dim))
+            input[..., 1, None] / (self._n ** (2 * (vec_pos[..., even_mask] / 2) / self.embed_dim))
         )
         y_embs[..., odd_mask]      = torch.cos(
             input[..., 1, None] / (self._n ** (2 * ((vec_pos[..., odd_mask] - 1) / 2) / self.embed_dim))
         )
-        embs                     = torch.concat([x_embs, y_embs], dim=-1).reshape(*input_og_shape[:-1], self.embed_dim)
+        embs                     = torch.concat([x_embs, y_embs], dim=-1).reshape(*orig_shape[:-1], self.embed_dim)
         return embs
     
 
 class DetectionHead(nn.Module):
     def __init__(
-            self, embed_dim: int, 
+            self, 
+            embed_dim: int, 
             num_classes: int, 
             det_3d: bool=True, 
-            num_seg_coefs: Optional[int]=None
         ):
         super(DetectionHead, self).__init__()
         self.embed_dim       = embed_dim
         self.num_classes     = num_classes
         self.det_3d          = det_3d
-        self.num_seg_coefs   = num_seg_coefs
 
         self.inception_module = nn.Sequential(
             nn.Linear(self.embed_dim, self.embed_dim),
@@ -283,23 +355,18 @@ class DetectionHead(nn.Module):
         self.obj_module            = nn.Linear(self.embed_dim, 1)
         self.loc_module            = nn.Linear(self.embed_dim, 8 if self.det_3d else 5)
         self.classification_module = nn.Linear(self.embed_dim, self.num_classes)
-        if self.num_seg_coefs:
-            self.seg_coef_module = nn.Sequential(
-                nn.Linear(self.embed_dim, num_seg_coefs),
-                nn.Tanh()
-            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Input
         --------------------------------
-        :x: (N, max_objs, embed_dim) output of the final TrackFormerDecoderLayer in the TrackFormer net
+        :x: (N, max_objs, embed_dim) output of a TrackFormerDecoderLayer in the TrackFormer net
 
         Returns
         --------------------------------
-        :output: (N, max_objs, det_params) (det_params = 8 or 5). For det_params = 8, we have:
-            [center_x, center_y, center_z, length, width, height, heading_angle, class_label].
-            For det_params = 4, we have [center_x, center_y, length, width, class_label]
+        :output: (N, max_objs, det_params) (det_params = num_classes + (8 or 5)). For detections = num_classes + 8, 
+            we have: [obj_score, center_x, center_y, center_z, length, width, height, heading_angle, [classes]].
+            For det_params = num_classes + 5, we have [obj_score, center_x, center_y, length, width, [[classes]]]
 
         """
         out       = self.inception_module(x)
@@ -307,10 +374,48 @@ class DetectionHead(nn.Module):
         loc       = self.loc_module(out)
         classification = self.classification_module(out)
         output = torch.concat([obj_score, loc, classification], dim=-1)
+        return output
+    
 
-        if self.num_seg_coefs:
-            seg_coefs = self.seg_coef_module(out)
-            output    = torch.concat([output, seg_coefs], dim=-1)
+class RasterMapCoefHead(nn.Module):
+    def __init__(
+            self, 
+            embed_dim: int, 
+            num_classes: int, 
+            num_coefs: int=None
+        ):
+        super(DetectionHead, self).__init__()
+        self.embed_dim        = embed_dim
+        self.num_classes      = num_classes
+        self.num_coefs        = num_coefs
+
+        self.inception_module = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.ReLU(),
+        )
+        self.obj_module            = nn.Linear(self.embed_dim, 1)
+        self.classification_module = nn.Linear(self.embed_dim, self.num_classes)
+        self.seg_coef_module       = nn.Sequential(
+            nn.Linear(self.embed_dim, num_coefs),
+            nn.Tanh()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Input
+        --------------------------------
+        :x: (N, max_objs, embed_dim) output of the RasterMapFormerDecoderLayer
+
+        Returns
+        --------------------------------
+        :output: (N, max_objs, 1 + seg_coefs + num_classes)
+
+        """
+        out       = self.inception_module(x)
+        obj_score = self.obj_module(out)
+        classification = self.classification_module(out)
+        seg_coefs = self.seg_coef_module(out)
+        output = torch.concat([obj_score, seg_coefs, classification], dim=-1)
         return output
     
 

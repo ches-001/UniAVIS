@@ -28,4 +28,6 @@ PAPERS:
 13. PointNet: Deep Learning on Point Sets for 3D Classification and Segmentation
 
 14. Scalability in Perception for Autonomous Driving: Waymo Open Dataset
+
+15. VectorMapNet: End-to-end Vectorized HD Map Learning
 """

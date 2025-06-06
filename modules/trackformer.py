@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .base import BaseFormer
 from .attentions import MultiHeadedAttention, DeformableAttention
 from .common import AddNorm, PosEmbedding1D, DetectionHead, SimpleMLP
 from typing import *
@@ -19,52 +20,52 @@ class TrackFormerDecoderLayer(nn.Module):
     ):
         super(TrackFormerDecoderLayer, self).__init__()
 
-        self.num_heads         = num_heads
-        self.embed_dim         = embed_dim
-        self.num_ref_points    = num_ref_points
-        self.dim_feedforward   = dim_feedforward
-        self.dropout           = dropout
-        self.offset_scale      = offset_scale
-        self.bev_feature_hw = bev_feature_hw
+        self.num_heads       = num_heads
+        self.embed_dim       = embed_dim
+        self.num_ref_points  = num_ref_points
+        self.dim_feedforward = dim_feedforward
+        self.dropout         = dropout
+        self.offset_scale    = offset_scale
+        self.bev_feature_hw  = bev_feature_hw
 
-        self.self_attention      = MultiHeadedAttention(
+        self.self_attention   = MultiHeadedAttention(
             self.num_heads, 
             self.embed_dim, 
             dropout=self.dropout, 
         )
-        self.addnorm1            = AddNorm(input_dim=self.embed_dim)
-        self.deform_attention    = DeformableAttention(
+        self.addnorm1         = AddNorm(input_dim=self.embed_dim)
+        self.deform_attention = DeformableAttention(
             self.num_heads,
             self.embed_dim, 
-            num_ref_points=num_ref_points, 
+            num_ref_points=self.num_ref_points, 
             dropout=self.dropout, 
             offset_scale=self.offset_scale,
             num_fmap_levels=1,
             concat_vq_for_offset=False,
         )
-        self.addnorm2            = AddNorm(input_dim=self.embed_dim)
-        self.mlp                 = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
-        self.addnorm3            = AddNorm(input_dim=self.embed_dim)
+        self.addnorm2 = AddNorm(input_dim=self.embed_dim)
+        self.mlp      = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
+        self.addnorm3 = AddNorm(input_dim=self.embed_dim)
 
     def forward(
             self, 
             queries: torch.Tensor,
             bev_features: torch.Tensor,
             ref_points: torch.Tensor, 
-            orig_det_queries: torch.Tensor,
-            padding_mask: torch.Tensor,
+            orig_det_queries: Optional[torch.Tensor]=None,
+            padding_mask: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
         """
         Input
         --------------------------------
 
-        :queries: (N, num_queries, det_embeds) input queries (num_queries = num_detections + num_track)
+        :queries: (N, num_queries, embed_dim) input queries (num_queries = (num_detections + num_track) | num_detections)
 
         :bev_features: (N, W_bev * H_bev, (C_bev or embed_dim))
 
         :ref_points: (N, num_queries, 1, 2), reference points for the deformable attention
 
-        :orig_det_queries: (N, num_detections, det_embeds), original object / detection queries
+        :orig_det_queries: (N, num_detections, embed_dim), original object / detection queries
 
         :padding_mask: (N, num_queries), padding / attention mask for queries (0 if to ignore else 1)
 
@@ -77,35 +78,38 @@ class TrackFormerDecoderLayer(nn.Module):
         assert bev_features.shape[2] == queries.shape[2] and bev_features.shape[2] == self.embed_dim
 
         bev_spatial_shape = torch.tensor([[H_bev, W_bev]], device=queries.device, dtype=torch.int64)
+        use_orig_queries  = ((orig_det_queries is not None) and (padding_mask is not None))
         num_queries       = queries.shape[1]
-        num_det           = orig_det_queries.shape[1]
-        num_tracks        = num_queries - num_det
-        q_and_k           = queries
-        
-        # i could have easily done queries[:, o_queries.shape[1]: :] += o_queries or so, but inplace operations
-        # on tensors with gradient history screw up gradients and causes inplace errors
-        if num_tracks > 0:
+        num_tracks        = None
+        if use_orig_queries:
+            num_det           = orig_det_queries.shape[1]
+            num_tracks        = num_queries - num_det
+            use_orig_queries  = use_orig_queries and (num_tracks > 0)
+
+        q_and_k = queries
+        if use_orig_queries:
             q_and_k = [q_and_k[:, :num_tracks, :], q_and_k[:, num_tracks:, :] + orig_det_queries]
             q_and_k = torch.concat(q_and_k, dim=1)
-        else:
-            q_and_k = q_and_k + orig_det_queries
-
         out1     = self.self_attention(q_and_k, q_and_k, queries, padding_mask=padding_mask)
-        out2     = self.addnorm1(queries, out1)
+
+        if padding_mask is not None:
+            queries = torch.masked_fill(queries, ~padding_mask[..., None], value=0.0)
+            
+        out2 = self.addnorm1(queries, out1)
         aug_out2 = out2
 
-        if num_tracks > 0:
-            aug_out2 = [out2[:, :num_tracks, :], out2[:, num_tracks:, :] + orig_det_queries]
-            aug_out2 = torch.concat(aug_out2, dim=1)
-        else:
-            aug_out2 = aug_out2 + orig_det_queries
-
+        attention_mask = None
+        if use_orig_queries:
+            aug_out2       = [out2[:, :num_tracks, :], out2[:, num_tracks:, :] + orig_det_queries]
+            aug_out2       = torch.concat(aug_out2, dim=1)
+            attention_mask = padding_mask[..., None]
+        
         out3 = self.deform_attention(
             aug_out2, 
             ref_points, 
             bev_features, 
             bev_spatial_shape, 
-            attention_mask=padding_mask[..., None], 
+            attention_mask=attention_mask, 
             normalize_ref_points=False
         )
         out4 = self.addnorm2(out2, out3)
@@ -114,7 +118,7 @@ class TrackFormerDecoderLayer(nn.Module):
         return out6
 
 
-class TrackFormer(nn.Module):
+class TrackFormer(BaseFormer):
     def __init__(
             self,
             num_heads: int, 
@@ -128,24 +132,22 @@ class TrackFormer(nn.Module):
             max_detections: int=900,
             learnable_pe: bool=True,
             bev_feature_hw: Tuple[int, int]=(200, 200),
-            track_threshold: float=0.5,
             det_3d: bool=True
         ):
         super(TrackFormer, self).__init__()
 
-        self.num_heads         = num_heads
-        self.embed_dim         = embed_dim
-        self.num_layers        = num_layers
-        self.num_classes       = num_classes
-        self.num_ref_points    = num_ref_points
-        self.dim_feedforward   = dim_feedforward
-        self.dropout           = dropout
-        self.offset_scale      = offset_scale
-        self.max_detections    = max_detections
-        self.learnable_pe      = learnable_pe
-        self.bev_feature_hw = bev_feature_hw
-        self.track_threshold   = track_threshold
-        self.det_3d            = det_3d
+        self.num_heads       = num_heads
+        self.embed_dim       = embed_dim
+        self.num_layers      = num_layers
+        self.num_classes     = num_classes
+        self.num_ref_points  = num_ref_points
+        self.dim_feedforward = dim_feedforward
+        self.dropout         = dropout
+        self.offset_scale    = offset_scale
+        self.max_detections  = max_detections
+        self.learnable_pe    = learnable_pe
+        self.bev_feature_hw  = bev_feature_hw
+        self.det_3d          = det_3d
 
         self.detection_pos_emb  = PosEmbedding1D(
             self.max_detections, 
@@ -157,7 +159,6 @@ class TrackFormer(nn.Module):
             embed_dim=self.embed_dim, 
             num_classes=self.num_classes, 
             det_3d=self.det_3d,
-            num_seg_coefs=None
         )
 
     def _create_decoder_layers(self) -> nn.ModuleList:
@@ -170,14 +171,13 @@ class TrackFormer(nn.Module):
             offset_scale=self.offset_scale,
             bev_feature_hw=self.bev_feature_hw
         ) for _ in range(self.num_layers)])
-    
 
     def forward(
             self, 
             bev_features: torch.Tensor, 
             track_queries: Optional[torch.Tensor]=None,
             track_queries_mask: Optional[torch.BoolTensor]=None,
-        ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         """
         Input
@@ -195,24 +195,21 @@ class TrackFormer(nn.Module):
             [center_x, center_y, center_z, length, width, height, heading_angle, class_label].
             For det_params = 4, we have [center_x, center_y, length, width, class_label]
 
-        if training:
-            :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
-                    (including invalid detections). NOTE: num_queries = num_detections (max_detections) + num_track. 
-                    num_track is the number of track_queries and it is dynamic as it depends on the number of valid.
-                    detections
+        :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item
+            (including invalid detections). NOTE: num_queries = num_detections (max_detections) + num_track. 
+            num_track is the number of track_queries and it is dynamic as it depends on the number of valid.
+            detections
 
-            :layers_detections: (num_layers, N, num_queries, det_params)
-
-        else:
-            :detections: (N, num_queries, det_params) batch of detection for multiple identified items
+        :detections: (num_layers, N, num_queries, det_params) | (N, num_queries, det_params) tensor contains 2d or 3d box
+            detections, if not in inference mode, the detection tensor contains detections across all decoder layers stacked
+            together, else it only contains detections from the last decoder layer
         """
         assert bev_features.shape[-1] == self.embed_dim
 
         batch_size        = bev_features.shape[0]
         device            = bev_features.device
-        detection_queries = self.detection_pos_emb()
-        detection_queries = detection_queries.tile(batch_size, 1, 1)
-        padding_mask      = torch.ones(*detection_queries.shape[:-1], device=device, dtype=torch.bool)
+        detection_queries = None
+        padding_mask      = None
         
         if track_queries is not None:
             # if track queries are available, combine (concatenate) them with the static detection queries
@@ -240,12 +237,16 @@ class TrackFormer(nn.Module):
 
             track_queries      = torch.stack(new_track_queries, dim=0)
             track_queries_mask = torch.stack(new_track_queries_mask, dim=0)
+            
+            detection_queries  = self.detection_pos_emb().tile(batch_size, 1, 1)
             queries            = torch.concat([track_queries, detection_queries], dim=1)
+
+            padding_mask       = torch.ones(*detection_queries.shape[:-1], device=device, dtype=torch.bool)
             padding_mask       = torch.concat([track_queries_mask, padding_mask], dim=1)
         else:
-            queries = detection_queries
+            queries = self.detection_pos_emb().tile(batch_size, 1, 1)
         
-        ref_points        = DeformableAttention.generate_standard_ref_points(
+        ref_points = DeformableAttention.generate_standard_ref_points(
             self.bev_feature_hw,
             batch_size=batch_size, 
             device=bev_features.device, 
@@ -262,9 +263,9 @@ class TrackFormer(nn.Module):
                 orig_det_queries=detection_queries,
                 padding_mask=padding_mask
             )
-            if not self.training:
+            if self.inference_mode:
                 if decoder_idx == self.num_layers - 1:
-                    return self.detection_module(queries)
+                    return queries, self.detection_module(queries)
             else:
                 detections = self.detection_module(queries)
                 layers_detections.append(detections)

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from .base import BaseFormer
 from .common import AddNorm, PosEmbedding1D, SpatialSinusoidalPosEmbedding, SimpleMLP
 from .attentions import MultiHeadedAttention, DeformableAttention
 from typing import *
@@ -93,7 +94,7 @@ class MotionFormerDecoderLayer(nn.Module):
         return output
     
 
-class MotionFormer(nn.Module):
+class MotionFormer(BaseFormer):
     def __init__(
             self,
             num_heads: int, 

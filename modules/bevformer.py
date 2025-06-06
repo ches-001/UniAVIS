@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision.models import resnet
+from .base import BaseFormer
 from .backbone import ResNetBackBone
 from .attentions import TemporalSelfAttention, SpatialCrossAttention
 from .common import AddNorm, PosEmbedding2D, SimpleMLP
@@ -121,7 +122,7 @@ class BEVFormerEncoderLayer(nn.Module):
         return out6
 
 
-class BEVFormer(nn.Module):
+class BEVFormer(BaseFormer):
     def __init__(
             self, 
             in_img_channels: int=3,
@@ -144,7 +145,7 @@ class BEVFormer(nn.Module):
         ):
         
         super(BEVFormer, self).__init__()
-
+    
         self.in_img_channels   = in_img_channels
         self.bb_block          = bb_block
         self.bb_block_layers   = bb_block_layers
@@ -167,12 +168,7 @@ class BEVFormer(nn.Module):
         # bev_queries: (C_bev, H_bev, W_bev)
         self.bev_query         = nn.Parameter(torch.randn(self.embed_dim, *self.bev_query_hw))
         self.register_buffer("z_refs", torch.linspace(*z_ref_range, steps=self.num_z_ref_points))
-        self.bev_pos_emb       = PosEmbedding2D(
-            bev_query_hw[1], 
-            bev_query_hw[0], 
-            embed_dim=self.embed_dim, 
-            learnable=self.learnable_pe
-        )
+        self.bev_pos_emb       = PosEmbedding2D(*bev_query_hw, embed_dim=self.embed_dim, learnable=self.learnable_pe)
         self.encoder_modules   = self._create_encoder_layers()
 
     def _create_encoder_layers(self) -> nn.ModuleList:
