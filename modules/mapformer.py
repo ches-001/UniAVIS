@@ -301,8 +301,8 @@ class VectorMapFormer(BaseFormer):
 
         # these element keypoints are the x, y values of the top left and bottom right corner points of the box that covers 
         # the polyline to be generated. We can use the center of these boxes as reference points for the deformable attention.
-        # element_kps shape: (N, max_elements, k, 2), where k = 2 (two corner vertices)
-        # classes shape:     (N, max_elements, num_classes)
+        # element_kps shape:  (N, max_elements, k, 2), where k = 2 (two corner vertices)
+        # class_logits shape: (N, max_elements, num_classes)
         bbox_kps     = self.bbox_kp_head(kps_queries)
         class_logits = self.bbox_class_head(torch.flatten(kps_queries, start_dim=2, end_dim=3))
         classes      = torch.argmax(class_logits, dim=-1)
