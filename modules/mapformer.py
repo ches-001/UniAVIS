@@ -305,6 +305,7 @@ class VectorMapFormer(BaseFormer):
         # classes shape:     (N, max_elements, num_classes)
         bbox_kps     = self.bbox_kp_head(kps_queries)
         class_logits = self.bbox_class_head(torch.flatten(kps_queries, start_dim=2, end_dim=3))
+        classes      = torch.argmax(class_logits, dim=-1)
 
         # class_emb        : (N, max_elements, 1, d)
         # kps_vertex_emb   : (N, max_elements, k, 2, d)
@@ -323,7 +324,7 @@ class VectorMapFormer(BaseFormer):
         if tgt_classes is not None:
             class_embs = self.class_emb(tgt_classes)
         else:
-            class_embs = self.class_emb(torch.argmax(class_logits, dim=-1).detach())   
+            class_embs = self.class_emb(classes)
 
         class_embs = class_embs[:, :, None, :]         
             
@@ -347,7 +348,7 @@ class VectorMapFormer(BaseFormer):
             return map_queries, polyline_logits, bbox_kps, class_logits
         else:
             map_queries, polylines = self._inference_body(input_queries, bev_features, coord_emb, ref_points)
-            return map_queries, polylines, bbox_kps, class_logits
+            return map_queries, polylines, bbox_kps, classes
         
 
     def _forward_body(
