@@ -2,20 +2,33 @@ import os
 from waymo_open_dataset import dataset_pb2
 from waymo_open_dataset.protos import map_pb2
 
-CAM_NAME_MAP    = {
+CAM_NAME_INDEX_LABELS    = {
     dataset_pb2.CameraName.FRONT: "FRONT_CAM",
     dataset_pb2.CameraName.FRONT_LEFT: "FRONT_LEFT_CAM",
     dataset_pb2.CameraName.FRONT_RIGHT: "FRONT_RIGHT_CAM",
     dataset_pb2.CameraName.SIDE_LEFT: "SIDE_LEFT",
     dataset_pb2.CameraName.SIDE_RIGHT: "SIDE_RIGHT",
 }
-LASER_NAME_MAP  = {
+LASER_NAME_INDEX_LABELS  = {
     dataset_pb2.LaserName.TOP: "TOP_LIDAR",
     dataset_pb2.LaserName.FRONT: "FRONT_LIDAR",
     dataset_pb2.LaserName.SIDE_LEFT: "SIDE_LEFT_LIDAR",
     dataset_pb2.LaserName.SIDE_RIGHT: "SIDE_RIGHT_LIDAR",
     dataset_pb2.LaserName.REAR: "REAR_LIDAR",
 }
+
+MAP_ELEMENT_LABEL_INDEXES = {
+    "lane": 0, 
+    "road_line": 1, 
+    "road_edge": 2, 
+    "stop_sign": 3, 
+    "crosswalk": 4, 
+    "speed_bump": 5, 
+    "driveway": 6
+}
+
+MAP_ELEMENT_INDEX_LABELS = {v : k for k, v in MAP_ELEMENT_LABEL_INDEXES.items()}
+
 ROAD_LINE_TYPES = {
     map_pb2.RoadLine.TYPE_UNKNOWN: (
       (0, 0, 0), "solid"
@@ -68,4 +81,5 @@ CAMERA_LABELS_LOCAL_PATH = os.path.join(DATA_PATH, "camera/labels")
 POINT_CLOUD_LOCAL_PATH   = os.path.join(DATA_PATH, "lidar/point_clouds")
 CAMERA_PROJ_LOCAL_PATH   = os.path.join(DATA_PATH, "lidar/camera_projections")
 LASER_LABELS_LOCAL_PATH  = os.path.join(DATA_PATH, "lidar/labels")
-MAP_IMAGE_LOCAL_PATH     = os.path.join(DATA_PATH, "map_features")
+MAP_MASKS_LOCAL_PATH     = os.path.join(DATA_PATH, "map_features/masks")
+MAP_POLYLINES_LOCAL_PATH = os.path.join(DATA_PATH, "map_features/polylines")

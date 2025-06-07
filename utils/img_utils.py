@@ -1,7 +1,7 @@
 import cv2
 import torch
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 def point_clouds_to_binary_bev_maps(
         point_clouds: torch.Tensor, 
@@ -160,3 +160,52 @@ def generate_occupancy_map(
         occ_maps *= binary_occ_maps[None]
     return occ_maps
     
+
+def polylines_to_xywh(polylines: List[np.ndarray]) -> List[np.ndarray]:
+    bboxes = []
+    for polyline in polylines:
+        assert polyline.ndim == 2
+        x1, y1, x2, y2 = polyline[:, 0].min(), polyline[:, 1].min(), polyline[:, 0].max(), polyline[:, 1].max()
+        w, h = x2 - x1, y2 - y1
+        x, y = x1 + (w/2), y1 + (h/2)
+        bboxes.append(np.asarray([x, y, w, h]))
+    return bboxes
+
+
+def polylines_to_masks(
+        polylines: List[np.ndarray],
+        img_hw: Tuple[int, int],
+        scale_factor: float=1.0,
+        fill_mask: Optional[List[bool]]=None
+    ) -> np.ndarray:
+    masks = []
+    for i, polyline in enumerate(polylines):
+        assert polyline.ndim == 2
+        mask = np.zeros((round(img_hw[0] * scale_factor), round(img_hw[1] * scale_factor)), dtype=np.uint8)
+        if fill_mask is not None:
+            if not fill_mask[i]:
+                cv2.polylines(mask, pts=polyline[None], isClosed=False, color=1)
+            else:
+                cv2.fillPoly(mask, pts=polyline[None], color=1)
+        else:
+            cv2.polylines(mask, pts=polyline[None], isClosed=False, color=1)
+        masks.append(mask)
+    masks = np.stack(masks, axis=0)
+    return masks
+
+
+def overlap_masks(masks: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    assert masks.ndim == 3
+    areas = masks.sum((1, 2))
+    sorted_indices = np.argsort(-areas)
+    final_mask = np.zeros(masks.shape[1:], dtype=(np.uint8 if masks.shape[0] <= 255 else np.uint32))
+    for i, sorted_idx in enumerate(sorted_indices):
+        final_mask += (masks[sorted_idx] * (i + 1)).astype(final_mask.dtype)
+        final_mask = np.clip(final_mask, a_min=0, a_max=i+1)
+    final_mask = final_mask
+    return final_mask[None], sorted_indices
+
+
+def polygons_to_overlapped_mask(*args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+    masks = polylines_to_masks(*args, **kwargs)
+    return overlap_masks(masks)

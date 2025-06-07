@@ -30,7 +30,7 @@ class WaymoDataset(Dataset):
             cam_img_hw: Tuple[int, int]=(480, 640),
             num_cloud_points: int=100_000,
             xyz_range: Optional[List[Tuple[int, int]]] = None,
-            frames_per_sample: int=3
+            frames_per_sample: int=3,
         ):
         self.data = data_or_path if isinstance(data_or_path, dict) else load_pickle_file(data_or_path)
         self.motion_horizon = motion_horizon
@@ -113,7 +113,9 @@ class WaymoDataset(Dataset):
         cam_extrinsics = None
         motion_tracks = None
         occupancy_map = None
-        bev_road_map = None
+        map_elements_mask = None
+        map_elements_polylines = None
+        map_elements_labels = None
         ego_trajectory = None
         motion_tracks = None
 
@@ -121,7 +123,7 @@ class WaymoDataset(Dataset):
             ego_pose, cam_intrinsic, cam_extrinsics = self._load_ego_pose_and_transforms(frame_dict)
             motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
             occupancy_map = self._generate_occupancy_map(motion_tracks)
-            bev_road_map = self._load_bev_road_map(frame_dict)
+            map_elements_mask, map_elements_polylines, map_elements_labels = self._load_bev_map_elements(frame_dict)
             ego_trajectory = self._get_planning_trajectory(sample_dict, frame_idx, ego_pose)
             motion_tracks = motion_tracks[:, 1:, :2]
 
@@ -134,7 +136,9 @@ class WaymoDataset(Dataset):
             cam_extrinsics=cam_extrinsics,
             motion_tracks=motion_tracks,
             occupancy_map=occupancy_map,
-            bev_road_map=bev_road_map,
+            map_elements_mask=map_elements_mask,
+            map_elements_polylines=map_elements_polylines,
+            map_elements_labels=map_elements_labels,
             ego_trajectory=ego_trajectory
         )
 
@@ -269,13 +273,36 @@ class WaymoDataset(Dataset):
 
 
     @check_perf
-    def _load_bev_road_map(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
-        map_img_path = frame_dict["map_img_path"]
-        map_img = np.load(map_img_path)
-        map_img = torch.from_numpy(map_img) / 255
-        if map_img.shape[1] != self.bev_map_hw[0] or map_img.shape[2] != self.bev_map_hw[1]:
-            map_img = F.interpolate(map_img[None], size=self.bev_map_hw, mode="bilinear")[0]
-        return map_img
+    def _load_bev_map_elements(
+        self, 
+        frame_dict: Dict[str, Any]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        map_element_dict = frame_dict["map_elements"]
+        mask_path = map_element_dict["mask_path"]
+        polylines_path = map_element_dict["polylines_path"]
+        eos_token = map_element_dict["eos_token"]
+        pad_token = map_element_dict["pad_token"]
+
+        polylines = np.load(polylines_path)
+        mask = np.load(mask_path)
+
+        labels = polylines[:, 0]
+        polylines = polylines[:, 1:]
+        polylines = polylines.reshape(polylines.shape[0], polylines.shape[1] // 2, 2)
+        eos_mask = polylines == eos_token
+        pad_mask = polylines == pad_token
+        xy_scale_ratio = [self.bev_map_hw[1], self.bev_map_hw[0]] / np.asarray([mask.shape[2], mask.shape[1]])
+        polylines = np.floor(polylines * xy_scale_ratio).astype(int)
+        polylines[eos_mask] = eos_token
+        polylines[pad_mask] = pad_token
+
+        mask = torch.from_numpy(mask)
+        polylines = torch.from_numpy(polylines)
+        
+        if mask.shape[1] != self.bev_map_hw[0] or mask.shape[2] != self.bev_map_hw[1]:
+            mask = F.interpolate(mask[None], size=self.bev_map_hw, mode="bilinear")[0]
+        return mask, polylines, labels
     
 
     @check_perf

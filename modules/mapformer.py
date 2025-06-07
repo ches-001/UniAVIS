@@ -154,8 +154,6 @@ class VectorMapFormer(BaseFormer):
             max_elements: int=500,
             max_vertices: int=500,
             learnable_pe: bool=True,
-            pad_token: Optional[int]=None,
-            eos_token: Optional[int]=None,
             bev_feature_hw: Tuple[int, int]=(200, 200),
         ):
         super(VectorMapFormer, self).__init__()
@@ -171,20 +169,25 @@ class VectorMapFormer(BaseFormer):
         self.max_elements    = max_elements
         self.learnable_pe    = learnable_pe
         self.bev_feature_hw  = bev_feature_hw
+
+        # valid vertex coordinate indexes will range from 0 to max(bev_W, bev_H) - 1, so it is only natural
+        # that the eos and pad tokens be an indexes outside this range. To avoid using up more memory than
+        # necessary for sequence embedding, we use max((bev_W, bev_H)) + 2 as embedding size, so eos and pad
+        # tokens are max(bev_W, bev_H) and max(bev_W, bev_H) + 1 respectively.
         grid_size            = max(self.bev_feature_hw)
-        self.pad_token       = pad_token if pad_token is not None else grid_size
-        self.eos_token       = eos_token if eos_token is not None else self.pad_token + 1
+        self.eos_token       = grid_size
+        self.pad_token       = self.eos_token + 1
         self.max_vertices    = max_vertices
         self.num_bbox_kps    = 2
         self.num_coord       = 2
 
-        self.box_kps_pos_emb    = PosEmbedding1D(self.num_bbox_kps, self.embed_dim, self.learnable_pe)
-        self.element_pos_emb    = PosEmbedding1D( self.max_elements, self.embed_dim, self.learnable_pe)
-        self.class_emb          = PosEmbedding1D(self.num_classes, self.embed_dim, self.learnable_pe)
-        self.vertex_seq_emb     = PosEmbedding1D(self.max_vertices, self.embed_dim, self.learnable_pe)
-        self.xy_coord_emb       = PosEmbedding1D(self.num_coord, self.embed_dim, self.learnable_pe)
-        self.grid_value_emb     = PosEmbedding1D(grid_size + 2, self.embed_dim, self.learnable_pe, self.pad_token)
-        self.kps_decoder        = VectorMapKeypointDecoderLayer(
+        self.box_kps_pos_emb   = PosEmbedding1D(self.num_bbox_kps, self.embed_dim, self.learnable_pe)
+        self.element_pos_emb   = PosEmbedding1D( self.max_elements, self.embed_dim, self.learnable_pe)
+        self.class_emb         = PosEmbedding1D(self.num_classes, self.embed_dim, self.learnable_pe)
+        self.vertex_seq_emb    = PosEmbedding1D(self.max_vertices, self.embed_dim, self.learnable_pe)
+        self.xy_coord_emb      = PosEmbedding1D(self.num_coord, self.embed_dim, self.learnable_pe)
+        self.grid_value_emb    = PosEmbedding1D(grid_size + 2, self.embed_dim, self.learnable_pe, self.pad_token)
+        self.kps_decoder       = VectorMapKeypointDecoderLayer(
             num_heads=self.num_heads, 
             embed_dim=self.embed_dim,
             num_ref_points=self.num_ref_points,
@@ -193,9 +196,9 @@ class VectorMapFormer(BaseFormer):
             offset_scale=self.offset_scale,
             bev_feature_hw=self.bev_feature_hw,
         )
-        self.bbox_kp_head        = SimpleMLP(self.embed_dim, 2, self.dim_feedforward, final_activation=nn.Sigmoid())
-        self.bbox_class_head     = SimpleMLP(self.embed_dim*self.num_bbox_kps, self.num_classes, self.dim_feedforward)
-        self.polyline_generator  = self._create_polyline_pred_layers()
+        self.bbox_kp_head       = SimpleMLP(self.embed_dim, 2, self.dim_feedforward, final_activation=nn.Sigmoid())
+        self.bbox_class_head    = SimpleMLP(self.embed_dim*self.num_bbox_kps, self.num_classes, self.dim_feedforward)
+        self.polyline_generator = self._create_polyline_pred_layers()
     
     def _get_ref_points_from_keypoints(self, kps: torch.Tensor, dequantize: bool) -> torch.Tensor:
         if dequantize:
@@ -269,7 +272,10 @@ class VectorMapFormer(BaseFormer):
 
         :tgt_classes: (N, max_elements), Target class labels for each map element
 
-        :tgt_vertices: (N, max_elements, max_vertices, 2), the target vertices for each element along the grid
+        :tgt_vertices: (N, max_elements, max_vertices, 2), the target vertices for each element along the grid, the targets
+            are organized like so [[x_0, y_0], [x_1, y_1], [x_2, y2], ..., [EOS, PAD], [PAD, PAD], [PAD, PAD]]. Basically
+            every sequnece ends with an EOS token and a PAD token as the x, y value, then subsequent values are [PAD, PAD]
+            if not up to maximum sequence length.
 
         :bev_features: (N, H_bev*W_bev, (C_bev or embed_dim)), BEV features from the BevFormer encoder
 
@@ -350,7 +356,6 @@ class VectorMapFormer(BaseFormer):
             map_queries, polylines = self._inference_body(input_queries, bev_features, coord_emb, ref_points)
             return map_queries, polylines, bbox_kps, classes
         
-
     def _forward_body(
             self, 
             input_queries: torch.Tensor,
