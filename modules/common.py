@@ -385,7 +385,7 @@ class RasterMapCoefHead(nn.Module):
             num_classes: int, 
             num_coefs: int=None
         ):
-        super(DetectionHead, self).__init__()
+        super(RasterMapCoefHead, self).__init__()
         self.embed_dim        = embed_dim
         self.num_classes      = num_classes
         self.num_coefs        = num_coefs
@@ -467,46 +467,6 @@ class SimpleMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
-    
-
-class SimpleConvMLP(nn.Module):
-    def __init__(
-            self, 
-            in_dim: int, 
-            out_dim: int, 
-            hidden_dim: int, 
-            mid_activation: Optional[nn.Module]=None, 
-            final_activation: Optional[nn.Module]=None,
-            dim_mode: str="1d"
-        ):
-        super(SimpleConvMLP, self).__init__()
-    
-        self.in_dim           = in_dim
-        self.out_dim          = out_dim
-        self.hidden_dim       = hidden_dim
-        self.mid_activation   = mid_activation or nn.ReLU()
-        self.final_activation = final_activation or nn.Identity()
-        self.dim_mode         = dim_mode
-
-        self.conv = nn.Sequential(
-            getattr(nn, f"Conv{dim_mode}")(self.in_dim, self.hidden_dim, kernel_size=1, stride=1),
-            self.mid_activation,
-            getattr(nn, f"Conv{dim_mode}")(self.hidden_dim, self.out_dim, kernel_size=1, stride=1),
-            self.final_activation
-        )
-
-    def forward(self, x: torch.Tensor, permute_dim: bool=True) -> torch.Tensor:
-        if self.dim_mode == "1d":
-            assert x.ndim == 3
-            if permute_dim:
-                return self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)
-            return self.conv(x)
-        else:
-            assert x.ndim == 4
-            if permute_dim:
-                return self.conv(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-            return self.conv(x)
-        
 
 
 class TemporalSpecificMLP(nn.Module):
