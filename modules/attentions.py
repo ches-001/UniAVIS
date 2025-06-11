@@ -3,6 +3,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import *
+try:
+    from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttnFunction \
+        as _MMCVDeformableAttentionFunction
+    _MMCV_EXTENSION_IS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _MMCV_EXTENSION_IS_AVAILABLE = False
+
+_CUDA_IS_AVAILABLE = torch.cuda.is_available()
 
 
 class DotProductAttention(nn.Module):
@@ -153,7 +161,8 @@ class DeformableAttention(nn.Module):
             dropout: float=0.1, 
             offset_scale: float=1.0,
             num_fmap_levels: int=4,
-            concat_vq_for_offset: bool=False
+            concat_vq_for_offset: bool=False,
+            im2col_steps: int=64,
         ):
         super(DeformableAttention, self).__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by n_head"
@@ -166,6 +175,7 @@ class DeformableAttention(nn.Module):
         self.head_dim             = self.embed_dim // self.num_heads
         self.num_fmap_levels      = num_fmap_levels
         self.concat_vq_for_offset = concat_vq_for_offset
+        self.im2col_steps         = im2col_steps
         offset_fc_in_dim          = self.embed_dim * (int(self.concat_vq_for_offset) + 1)
         
         self.V_fc       = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -178,7 +188,7 @@ class DeformableAttention(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim, bias=False),
             nn.Dropout(dropout)
         )
-
+    
     def forward(
             self, 
             queries: torch.Tensor, 
@@ -228,8 +238,6 @@ class DeformableAttention(nn.Module):
             
         value = self.V_fc(value).reshape(batch_size, value_len, self.num_heads, -1)
 
-        # V shape: (batch_size, num_heads, embed_dim // num_head, value_len)
-        value = value.permute(0, 2, 3, 1)
 
         offsets = offsets.reshape(batch_size, query_len, self.num_heads, self.num_fmap_levels, self.num_ref_points, 2)
         offsets = self.offset_scale * offsets
@@ -244,34 +252,48 @@ class DeformableAttention(nn.Module):
                 attn = attn.masked_fill(~attention_mask, value=0)
             else:
                 attn = attn * attention_mask
-            
-        # attn shape: (N, num_heads, num_fmap_levels, query_len, num_ref_points)
-        attn = attn.permute(0, 2, 3, 1, 4)
         
         if normalize_ref_points:
             max_xy     = value_spatial_shapes.flip(dim=-1) - 1
             ref_points = 2 * (ref_points / max_xy[None, None, ...]) - 1
 
-        sample_locs = (ref_points[:, :, None, :, None, :] + offsets).clamp(min=-1, max=1)
+        sample_locs = torch.clamp(ref_points[:, :, None, :, None, :] + offsets, min=-1, max=1)
 
-        # sample_locs shape: (N, num_heads, num_fmap_levels, query_len, num_ref_points, 2)
+        level_start_indexes = value_spatial_shapes.prod(dim=-1)
+        level_start_indexes = level_start_indexes.cumsum(dim=-1) - level_start_indexes
+
+        if _MMCV_EXTENSION_IS_AVAILABLE and _CUDA_IS_AVAILABLE:
+            sample_locs = (sample_locs - 1) / 2
+            output = _MMCVDeformableAttentionFunction.apply(
+                value, value_spatial_shapes, level_start_indexes, sample_locs, attn, self.im2col_steps
+            )
+            output = self.out_fc(output)
+            return output
+
+        # value shape: 
+        #   (N, value_len, num_heads, embed_dim // num_head) ->
+        #   (N, num_heads, embed_dim // num_head, value_len)
+
+        # attn shape: 
+        #   (N, query_len, num_heads, num_fmap_levels, num_points) ->
+        #   (N, num_heads, num_fmap_levels, query_len, num_points)
+
+        # sample_locs shape: 
+        #   (N, query_len, num_heads, num_fmap_levels, num_points, 2) ->
+        #   (N, num_heads, num_fmap_levels, query_len, num_points, 2)
+        value       = value.permute(0, 2, 3, 1)
+        attn        = attn.permute(0, 2, 3, 1, 4)
         sample_locs = sample_locs.permute(0, 2, 3, 1, 4, 5)
 
         value       = value.reshape(-1, *value.shape[2:])
-        sample_locs = sample_locs.reshape(-1, *sample_locs.shape[2:])
         attn        = attn.reshape(-1, *attn.shape[2:])
+        sample_locs = sample_locs.reshape(-1, *sample_locs.shape[2:])
         output      = None
-
-        value_spatial_indexes = torch.tensor(
-            [0] + [(shape[0] * shape[1]) for shape in value_spatial_shapes], 
-            dtype=torch.int64, 
-            device=queries.device
-        ).cumsum(dim=-1)
         
-        for (lvl_idx, lvl_start) in enumerate(value_spatial_indexes[:-1]):
+        for (lvl_idx, lvl_start) in enumerate(level_start_indexes):
             level_shape = value_spatial_shapes[lvl_idx]
             sample_loc  = sample_locs[:, lvl_idx, ...]
-            lvl_end     = value_spatial_indexes[lvl_idx + 1]
+            lvl_end     = lvl_start + (level_shape[0] * level_shape[1])
             fmap        = value[..., lvl_start:lvl_end]
             
             _, head_dim, lvl_size = fmap.shape
@@ -285,9 +307,9 @@ class DeformableAttention(nn.Module):
                 output = sampled_features
             else:
                 output = output + sampled_features
-
+        
         output = output.reshape(batch_size, self.embed_dim, query_len, self.num_ref_points)
-        output = output.permute(0, 2, 1, 3).sum(dim=-1)
+        output = output.sum(dim=-1).permute(0, 2, 1)
         output = self.out_fc(output)
         return output
     
@@ -318,7 +340,7 @@ class DeformableAttention(nn.Module):
         return ref_points
     
 
-class MultiView3DDeformableAttention(DeformableAttention):
+class MultiViewDeformableAttention(DeformableAttention):
     def __init__(
             self, 
             num_heads: int, 
@@ -331,7 +353,7 @@ class MultiView3DDeformableAttention(DeformableAttention):
             num_fmap_levels: int=4,
             concat_vq_for_offset: bool=False
     ):
-        super(MultiView3DDeformableAttention, self).__init__( 
+        super(MultiViewDeformableAttention, self).__init__( 
             num_heads=num_heads, 
             embed_dim=embed_dim, 
             num_ref_points=num_ref_points, 
@@ -344,8 +366,8 @@ class MultiView3DDeformableAttention(DeformableAttention):
         self.num_views        = num_views
         self.num_z_ref_points = num_z_ref_points
         _attn_out             = (
-            self.num_heads
-            * self.num_views  
+            self.num_views
+            * self.num_heads
             * self.num_fmap_levels 
             * self.num_ref_points 
             * self.num_z_ref_points
@@ -408,14 +430,11 @@ class MultiView3DDeformableAttention(DeformableAttention):
 
         value = self.V_fc(value).reshape(batch_size, num_views, value_len, self.num_heads, -1)
 
-        # V shape: (batch_size, num_heads, num_views, num_embed // num_head, value_len)
-        value = value.permute(0, 3, 1, 4, 2)
-
         offsets = offsets.reshape(
             batch_size, 
             query_len, 
-            self.num_heads, 
-            self.num_views, 
+            self.num_views,
+            self.num_heads,
             self.num_fmap_levels, 
             self.num_ref_points, 
             self.num_z_ref_points, 
@@ -426,56 +445,76 @@ class MultiView3DDeformableAttention(DeformableAttention):
         attn    = attn.reshape(
             batch_size, 
             query_len, 
-            self.num_heads, 
             self.num_views,
+            self.num_heads, 
             self.num_fmap_levels * self.num_ref_points * self.num_z_ref_points
         )
         attn    = F.softmax(attn, dim=-1)
         attn    = attn.reshape(
             batch_size, 
             query_len, 
-            self.num_heads, 
             self.num_views, 
+            self.num_heads, 
             self.num_fmap_levels, 
             self.num_ref_points, 
             self.num_z_ref_points
         )
         if attention_mask is not None:
-            attention_mask = attention_mask[:, :, None, :, :, None, :]
+            attention_mask = attention_mask[:, :, :, None, :, None, :]
             if attention_mask.dtype == torch.bool:
                 attn = attn.masked_fill(~attention_mask, value=0)
             else:
                 attn = attn * attention_mask
-
-        # attn shape: (batch_size, num_heads, num_views, num_fmap_levels, query_len, num_ref_points, num_z_ref_points)
-        attn = attn.permute(0, 2, 3, 4, 1, 5, 6)
         
         if normalize_ref_points:
             max_xy     = value_spatial_shapes.flip(dim=-1) - 1
             ref_points = 2 * (ref_points / max_xy[None, None, None, :, None, :]) - 1
 
-        # sample_locs shape: 
-        #   (batch_size, num_heads, num_views, num_fmap_levels, query_len, num_ref_points, num_z_ref_points, 2)
-        sample_locs = ref_points[:, :, None, :, :, None, :, :] + offsets
-        sample_locs = sample_locs.clamp(min=-1, max=1)
+        sample_locs = ref_points[:, :, :, None, :, None, :, :] + offsets
+        sample_locs = torch.clamp(sample_locs, min=-1, max=1)
+
+        level_start_indexes = value_spatial_shapes.prod(dim=-1)
+        level_start_indexes = level_start_indexes.cumsum(dim=-1) - level_start_indexes
+
+        if _MMCV_EXTENSION_IS_AVAILABLE and _CUDA_IS_AVAILABLE:
+            value       = value.reshape(-1, *value.shape[2:])
+            attn        = attn.permute(0, 2, 1, 3, 4, 5, 6)
+            attn        = attn.reshape(-1, *attn.shape[2:-2], all_points).contiguous()
+            sample_locs = sample_locs.permute(0, 2, 1, 3, 4, 5, 6, 7)
+            sample_locs = sample_locs.reshape(-1, *sample_locs.shape[2:-3], all_points, 2).contiguous()
+            sample_locs = (sample_locs - 1) / 2
+            output      = _MMCVDeformableAttentionFunction.apply(
+                value, value_spatial_shapes, level_start_indexes, sample_locs, attn, self.im2col_steps
+            )
+            output      = torch.unflatten(output, dim=0, sizes=(batch_size, num_views)).sum(dim=1)
+            output      = self.out_fc(output)
+            return output
+
+        # value shape: 
+        #   (N, num_views, value_len, num_heads, num_embed // num_head) ->
+        #   (N, num_views, num_heads, num_embed // num_head, value_len)
+
+        # attn shape: 
+        #   (N, query_len, num_views, num_heads, num_fmap_levels, num_ref_points, num_z_ref_points) ->
+        #   (N, num_views, num_heads, num_fmap_levels, query_len, num_ref_points, num_z_ref_points)
+
+        # samplwe_locs shape: 
+        #   (N, query_len, num_views, num_heads, num_fmap_levels, num_ref_points, num_z_ref_points, 2) ->
+        #   (N, num_views, num_heads, num_fmap_levels, query_len, num_ref_points, num_z_ref_points, 2)
+        value       = value.permute(0, 1, 3, 4, 2)
+        attn        = attn.permute(0, 2, 3, 4, 1, 5, 6)
         sample_locs = sample_locs.permute(0, 2, 3, 4, 1, 5, 6, 7)
 
         # reshape for calculations
         value       = value.reshape(-1, *value.shape[3:])
-        sample_locs = sample_locs.reshape(-1, *sample_locs.shape[3:-3], all_points, 2)
         attn        = attn.reshape(-1, *attn.shape[3:-2], all_points)
+        sample_locs = sample_locs.reshape(-1, *sample_locs.shape[3:-3], all_points, 2)
         output      = None
-
-        value_spatial_indexes = torch.tensor(
-            [0] + [(shape[0] * shape[1]) for shape in value_spatial_shapes], 
-            dtype=torch.int64, 
-            device=queries.device
-        ).cumsum(dim=-1)
         
-        for (lvl_idx, lvl_start) in enumerate(value_spatial_indexes[:-1]):
+        for (lvl_idx, lvl_start) in enumerate(level_start_indexes):
             level_shape = value_spatial_shapes[lvl_idx]
             sample_loc  = sample_locs[:, lvl_idx, ...]
-            lvl_end     = value_spatial_indexes[lvl_idx + 1]
+            lvl_end     = lvl_start + (level_shape[0] * level_shape[1])
             fmap        = value[..., lvl_start:lvl_end]
             
             _, head_dim, lvl_size = fmap.shape
@@ -489,11 +528,9 @@ class MultiView3DDeformableAttention(DeformableAttention):
             else:
                 output = output + sampled_features
 
-        output = output.reshape(
-            batch_size, self.num_heads, num_views, head_dim, query_len, all_points
-        ).permute(0, 4, 2, 1, 3, 5)
-        output = output.reshape(batch_size, query_len, num_views, self.embed_dim, all_points)
-        output = output.sum(dim=(2, -1))
+        output = output.reshape(batch_size, num_views, self.num_heads, head_dim, query_len, all_points)
+        output = output.sum(dim=(1, -1)).reshape(batch_size, self.embed_dim, query_len)
+        output = output.permute(0, 2, 1)
         output = self.out_fc(output)
         return output
 
@@ -605,7 +642,7 @@ class TemporalSelfAttention(DeformableAttention):
         return output
 
 
-class SpatialCrossAttention(MultiView3DDeformableAttention):
+class SpatialCrossAttention(MultiViewDeformableAttention):
     def __init__(self, 
             num_heads: int, 
             embed_dim: int, 

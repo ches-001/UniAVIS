@@ -5,7 +5,7 @@ from .base import BaseFormer
 from .backbone import ResNetBackBone
 from .attentions import TemporalSelfAttention, SpatialCrossAttention
 from .common import AddNorm, PosEmbedding2D, SimpleMLP
-from typing import Optional, Tuple, List, Type
+from typing import Optional, Tuple, Type
     
 
 class BEVFormerEncoderLayer(nn.Module):

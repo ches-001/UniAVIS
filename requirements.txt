@@ -1,3 +1,4 @@
+# follow instructions to build mmcv from source: https://mmcv.readthedocs.io/en/latest/get_started/build.html
 numpy
 pandas
 matplotlib
