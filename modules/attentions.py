@@ -622,6 +622,9 @@ class TemporalSelfAttention(DeformableAttention):
         # 2. Transform the global coordinates back to ego vehicle coordinates with the 
         #   pose-inverse of the ego vehicle in current frame
 
+        # Both steps can be combined into one step with a single transformation matrix which will serve as our
+        # transition matrix, pretty neat.
+
         x_range              = (self.grid_xy_res[0] * W_bev / 2) - (self.grid_xy_res[0] / 2)
         y_range              = (self.grid_xy_res[1] * H_bev / 2) - (self.grid_xy_res[1] / 2)
         xindex               = torch.linspace(-x_range, x_range, steps=W_bev, device=device)
