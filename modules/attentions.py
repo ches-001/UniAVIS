@@ -542,7 +542,8 @@ class TemporalSelfAttention(DeformableAttention):
             embed_dim: int, 
             num_ref_points: int=4, 
             dropout: float=0.1, 
-            offset_scale: float=1.0
+            offset_scale: float=1.0,
+            grid_xy_res: Tuple[float, float]=(0.512, 0.512)
         ):
         
         super(TemporalSelfAttention, self).__init__(
@@ -554,8 +555,8 @@ class TemporalSelfAttention(DeformableAttention):
             num_fmap_levels=1, 
             concat_vq_for_offset=True
         )
-
-        self.offsets_fc = nn.Linear(self.embed_dim * 2, self.num_heads * self.num_ref_points * 2)
+        self.grid_xy_res = grid_xy_res
+        self.offsets_fc  = nn.Linear(self.embed_dim * 2, self.num_heads * self.num_ref_points * 2)
 
     def forward(
             self, 
@@ -592,7 +593,7 @@ class TemporalSelfAttention(DeformableAttention):
         ref_points  = TemporalSelfAttention.generate_standard_ref_points(
             (H_bev, W_bev), batch_size, device=device, normalize=True
         )
-        ref_points = ref_points.unsqueeze(dim=-2)
+        ref_points = ref_points[..., None, :]
 
         # for bev_histories to be None, it implies that we are working with the very first timestep of the
         # simulation. As such, the proposed temporal self attention will simply decay to a standard self
@@ -609,23 +610,30 @@ class TemporalSelfAttention(DeformableAttention):
 
         assert transition_matrices is not None
 
-        # The goal of this subsection before the deformable attention section is to align the bev_histories (B{t-1}) to
-        # the BEV Query. This is to ensure that we account fo the spatial change that has occured in the newly created
-        # BEV feature (B{t}). We get the grid space of B{t-1}, we take this space through an affine transformation by
-        # multiplying the grid space by the transition matrix (rotation and translation matrices) that transitioned the
-        # ego vehicle from t-1 to t on global real world coordinates that have been discretized on the BEV grid. 
-        # We then normalise the grid space to be within the range of [-1, 1], then we sample feature maps from B{t-1} 
-        # along the newly aligned grid.
-        xindex               = torch.arange(W_bev, device=device)
-        yindex               = torch.arange(H_bev, device=device)
+        # The goal of this subsection before the deformable attention section is to align the BEV feature 
+        # history (B{t-1}) to the current BEV feature (B{t}). This is to ensure that we account fo the spatial 
+        # change that has occured in the newly created BEV feature (B{t}).
+
+        # The transition matrix in question does the following:
+
+        # 1. Transform the generated grid / ego vehicle coordinates to global coordinates
+        #    with the pose of the ego vehicle in the previous frame
+
+        # 2. Transform the global coordinates back to ego vehicle coordinates with the 
+        #   pose-inverse of the ego vehicle in current frame
+
+        x_range              = (self.grid_xy_res[0] * W_bev / 2) - (self.grid_xy_res[0] / 2)
+        y_range              = (self.grid_xy_res[1] * H_bev / 2) - (self.grid_xy_res[1] / 2)
+        xindex               = torch.linspace(-x_range, x_range, steps=W_bev, device=device)
+        yindex               = torch.linspace(-y_range, y_range, steps=H_bev, device=device)
         ygrid, xgrid         = torch.meshgrid([yindex, xindex], indexing="ij")
         bev_grid_2d          = torch.stack([xgrid, ygrid], dim=-1).to(dtype=torch.float32, device=device)
         ones                 = torch.ones(*bev_grid_2d.shape[:-1], 1, dtype=bev_grid_2d.dtype, device=device)
         bev_grid_3d          = torch.concat([bev_grid_2d, ones], dim=-1)[None].tile(batch_size, 1, 1, 1)
         aligned_grid         = torch.einsum("nttii,nhwik->nhwik", transition_matrices[:, None, None], bev_grid_3d[..., None])
         aligned_grid         = aligned_grid[..., :2, 0]
-        aligned_grid[..., 0] = 2 * (aligned_grid[..., 0] / (W_bev - 1)) - 1
-        aligned_grid[..., 1] = 2 * (aligned_grid[..., 1] / (H_bev - 1)) - 1
+        aligned_grid[..., 0] /= x_range
+        aligned_grid[..., 1] /= y_range
         bev_histories        = bev_histories.permute(0, 2, 1).reshape(batch_size, C_bev, H_bev, W_bev)
         bev_histories        = F.grid_sample(
             bev_histories, aligned_grid, mode="bilinear", padding_mode="zeros", align_corners=True
@@ -677,7 +685,6 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
             bev_spatial_shape: torch.LongTensor,
             multiscale_fmaps: torch.Tensor,
             multiscale_fmap_shapes: torch.LongTensor,
-            img_spatial_shape: torch.LongTensor,
             z_refs: torch.Tensor,
             cam_proj_matrices: torch.Tensor,
         ) -> torch.Tensor:
@@ -718,25 +725,21 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         device         = bev_queries.device
 
         # Create BEV 2D grids pace
-        xindex          = torch.arange(W_bev, device=device)
-        yindex          = torch.arange(H_bev, device=device)
-        ygrid, xgrid    = torch.meshgrid([yindex, xindex], indexing="ij")
-        grid_2d         = torch.stack([xgrid, ygrid], dim=-1)
-        grid_2d         = grid_2d.to(dtype=torch.float32, device=device)
-
         # map BEV grid space to real world coordinates: If the BEV grid is a (200 x 200) grid
         # the index along both axes will range from 0 to 199, if the real world coordinates range
         # from -51.2m to 51.2m across both x and y axes, with the grid cell space being (0.512m, 0.512m)
-        # across both axes, then we need to ensure that index (0, 0) represents a grid cell whose top left
-        # corner is at (-51.2m, -51.2m) in real space and index (199, 199) represents a grid whose bottom 
-        # right corner is at (51.2m, 51.2m) in real space. This also means that the real x, y center of cell
-        # (0, 0) is (-50.944m, -50.944m) and the center for cell (199, 199) is (-50.944m, 50.944m).
-        grid_xy_res     = torch.tensor(self.grid_xy_res, device=device)
-        grid_wh         = torch.tensor([W_bev, H_bev], device=device)
-        max_grid_xy     = grid_wh - 1
-        min_real_xy     = ((-grid_wh / 2) * grid_xy_res) + (grid_xy_res - (grid_xy_res / 2))
-        max_real_xy     = -min_real_xy
-        grid_2d[..., :2] = (((max_real_xy - min_real_xy) * grid_2d[..., :2]) / max_grid_xy) + min_real_xy
+        # across both axes, then we need to ensure that index (0, 0) represents  the center of a grid cell
+        # whose top left corner is at (-51.2m, -51.2m) in real ego vehicle space and index (199, 199)
+        # represents the center of a grid cell whose bottom  right corner is at (51.2m, 51.2m) in real ego
+        # vehicle space. This also means that the x, y center of cell (0, 0) is (-50.944m, -50.944m) and
+        # the center for cell (199, 199) is (-50.944m, 50.944m).
+        x_range         = (self.grid_xy_res[0] * W_bev / 2) - (self.grid_xy_res[0] / 2)
+        y_range         = (self.grid_xy_res[1] * H_bev / 2) - (self.grid_xy_res[1] / 2)
+        xindex          = torch.linspace(-x_range, x_range, steps=W_bev, device=device)
+        yindex          = torch.linspace(-y_range, y_range, steps=H_bev, device=device)
+        ygrid, xgrid    = torch.meshgrid([yindex, xindex], indexing="ij")
+        grid_2d         = torch.stack([xgrid, ygrid], dim=-1)
+        grid_2d         = grid_2d.to(dtype=torch.float32, device=device)
 
         # Create 3D grid space, this phenomenon is called pillaring, this is where we
         # raise the 2D grid space to 3D pillars given some z-axis reference points
@@ -753,14 +756,15 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         proj_2d = torch.einsum("vtttki,txyzij->vxyzkj", cam_proj_matrices[:, None, None, None, ...], grid_3d[None, ..., None])
         proj_2d = proj_2d[..., :2, 0]
 
-        # since we just need reference points normalized to be within range (-1, 1), we just need to divide ref_points indexes
-        # by max img indexes (img_w - 1, img_h - 1), then scale accordingly.
+        # We need reference points normalized to be within range (-1, 1), we just need to divide ref_points
+        # by (x_range, y_range).
         ref_points = proj_2d.reshape(num_views, H_bev * W_bev, self.num_z_ref_points, 2).permute(1, 0, 2, 3)
-        ref_points = 2 * (ref_points[:, :, None, :, :] / (img_spatial_shape[None, None, None] - 1)) - 1
-        ref_points = ref_points[None].tile(batch_size, 1, 1, multiscale_fmap_shapes.shape[0], 1, 1)
+        ref_points[..., 0] /= x_range
+        ref_points[..., 1] /= y_range
+        ref_points = ref_points[None, :, :, None, :, :].tile(batch_size, 1, 1, multiscale_fmap_shapes.shape[0], 1, 1)
 
         # calculate the attention mask
-        attention_mask    = (ref_points[..., 0] >= -1) & (ref_points[..., 1] <= 1)
+        attention_mask = (ref_points[..., 0] >= -1) & (ref_points[..., 1] <= 1)
 
         output = super(SpatialCrossAttention, self).forward(
             queries=bev_queries, 

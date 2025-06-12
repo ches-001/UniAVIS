@@ -64,7 +64,6 @@ class BEVFormerEncoderLayer(nn.Module):
             multiscale_fmap_shapes: torch.Tensor,
             transition_matrices: torch.Tensor,
             z_refs: torch.Tensor,
-            img_spatial_shape: torch.LongTensor,
             cam_proj_matrices: torch.Tensor,
             bev_histories: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
@@ -84,8 +83,6 @@ class BEVFormerEncoderLayer(nn.Module):
         :transition_matrices: (N, 3, 3), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
 
         :z_refs: (num_z_ref_points, ) z-axis reference points
-
-        :img_spatial_shape: (1, 2) original images shape
 
         :cam_proj_matrices: (V, 3, 4) camera intrinsic matrices for each view, for projecting from real world
                             coordinate to 
@@ -111,7 +108,6 @@ class BEVFormerEncoderLayer(nn.Module):
             bev_spatial_shape=bev_spatial_shape,
             multiscale_fmaps=multiscale_fmaps, 
             multiscale_fmap_shapes=multiscale_fmap_shapes,
-            img_spatial_shape=img_spatial_shape,
             z_refs=z_refs, 
             cam_proj_matrices=cam_proj_matrices, 
         )
@@ -242,7 +238,6 @@ class BEVFormer(BaseFormer):
         bev_queries          = bev_queries.reshape(batch_size, H_bev * W_bev, self.embed_dim)
 
         bev_spatial_shape = torch.tensor([self.bev_query_hw], device=device, dtype=torch.int64)
-        img_spatial_shape = torch.tensor([[H_img, W_img]], device=device, dtype=torch.int64)
 
         for encoder_idx in range(0, len(self.encoder_modules)):
             bev_features = self.encoder_modules[encoder_idx](
@@ -252,7 +247,6 @@ class BEVFormer(BaseFormer):
                 multiscale_fmap_shapes=multiscale_fmap_shapes,
                 transition_matrices=transition_matrices,
                 z_refs=self.z_refs,
-                img_spatial_shape=img_spatial_shape,
                 cam_proj_matrices=cam_proj_matrices,
                 bev_histories=bev_histories,
             )
