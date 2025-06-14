@@ -283,13 +283,13 @@ class VectorMapFormer(BaseFormer):
         --------------------------------
         :map_queries: (N, num_elements, embed_dim), computed context queries pooled along the vertices dimension.
 
-        :polylines: (N, num_elements, num_vertices, 2) | (N, num_elements, num_vertices, 2, num_grid), Contains either class
-            labels of class logits depending on whether inference mode has been set or not 
+        :polylines | polyline_logits: (N, num_elements, num_vertices, 2) | (N, num_elements, num_vertices, 2, num_grid),
+            Contains either class labels of class logits depending on whether inference mode has been set or not 
             
         :box_kps: (N, num_elements, num_kp, 2), Keypoints that define the box that encloses the polyline
 
-        :classes: (N, num_elements) | (N, num_elements, num_classes), Predicted class labels or class logits depending on whether
-            inference mode has been set or not 
+        :classes | class logits: (N, num_elements) | (N, num_elements, num_classes), Predicted class labels or class logits
+            depending on whether inference mode has been set or not 
         """
 
         batch_size = bev_features.shape[0]

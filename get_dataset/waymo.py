@@ -14,12 +14,95 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from waymo_open_dataset import dataset_pb2
 from waymo_open_dataset.protos import map_pb2
 from waymo_open_dataset.utils.frame_utils import convert_range_image_to_point_cloud
-from utils.io_utils import delete_path, save_pickle_file
+from utils.io_utils import delete_path, save_pickle_file, save_json_file
 from utils.img_utils import overlap_masks
 from typing import Dict, Any, Callable, Optional, Tuple, Iterable
-from constants import *
+
+
+CAM_NAME_INDEX_LABELS    = {
+    dataset_pb2.CameraName.FRONT: "FRONT_CAM",
+    dataset_pb2.CameraName.FRONT_LEFT: "FRONT_LEFT_CAM",
+    dataset_pb2.CameraName.FRONT_RIGHT: "FRONT_RIGHT_CAM",
+    dataset_pb2.CameraName.SIDE_LEFT: "SIDE_LEFT",
+    dataset_pb2.CameraName.SIDE_RIGHT: "SIDE_RIGHT",
+}
+
+LASER_NAME_INDEX_LABELS  = {
+    dataset_pb2.LaserName.TOP: "TOP_LIDAR",
+    dataset_pb2.LaserName.FRONT: "FRONT_LIDAR",
+    dataset_pb2.LaserName.SIDE_LEFT: "SIDE_LEFT_LIDAR",
+    dataset_pb2.LaserName.SIDE_RIGHT: "SIDE_RIGHT_LIDAR",
+    dataset_pb2.LaserName.REAR: "REAR_LIDAR",
+}
+
+MAP_ELEMENT_LABEL_INDEXES = {
+    "lane": 0, 
+    "road_line": 1, 
+    "road_edge": 2, 
+    "stop_sign": 3, 
+    "crosswalk": 4, 
+    "speed_bump": 5, 
+    "driveway": 6
+}
+
+ROAD_LINE_TYPES = {
+    map_pb2.RoadLine.TYPE_UNKNOWN: (
+      (0, 0, 0), "solid"
+    ),
+    map_pb2.RoadLine.TYPE_BROKEN_SINGLE_WHITE: (
+      (190, 190, 190), "dash"
+    ),
+    map_pb2.RoadLine.TYPE_SOLID_SINGLE_WHITE: (
+      (190, 190, 190), "solid"
+    ),
+    map_pb2.RoadLine.TYPE_SOLID_DOUBLE_WHITE: (
+        (190, 190, 190), "solid"
+    ),
+    map_pb2.RoadLine.TYPE_BROKEN_SINGLE_YELLOW: (
+        (208, 255, 20), "dash"
+    ),
+    map_pb2.RoadLine.TYPE_BROKEN_DOUBLE_YELLOW: (
+        (208, 255, 20), "dash"
+    ),
+    map_pb2.RoadLine.TYPE_SOLID_SINGLE_YELLOW: (
+        (208, 255, 20), "solid"
+    ),
+    map_pb2.RoadLine.TYPE_PASSING_DOUBLE_YELLOW: (
+        (208, 255, 20), "dash"
+    ),
+}
+ROAD_EDGE_TYPES = {
+    map_pb2.RoadEdge.TYPE_UNKNOWN: ((0, 0, 0), "solid"),
+    map_pb2.RoadEdge.TYPE_ROAD_EDGE_BOUNDARY: ((0, 255, 0), "solid"),
+    map_pb2.RoadEdge.TYPE_ROAD_EDGE_MEDIAN: ((0, 255, 0), "solid"),
+}
+LANE_TYPES      = {
+    map_pb2.LaneCenter.TYPE_UNDEFINED: ((0, 0, 0), "solid"),
+    map_pb2.LaneCenter.TYPE_FREEWAY: ((255, 255, 255), "solid"),
+    map_pb2.LaneCenter.TYPE_SURFACE_STREET: ((65, 105, 225), "solid"),
+    map_pb2.LaneCenter.TYPE_BIKE_LANE: ((204, 0, 204), "solid"),
+}
+
+CROSSWALK_TYPE  = ((255, 165, 0), "solid")
+SPEED_BUMP_TYPE = ((0, 128, 128), "solid")
+STOP_SIGN_TYPE  = ((190, 20, 20), "solid")
+DRIVEWAY_TYPE   = ((70, 150, 90), "solid")
+DEFAULT         = ((0, 0, 0), "solid")
+
+GCSFS_PERCEPTION_DATA    = "waymo_open_dataset_v_1_4_3/individual_files"
+TEMP_DATA_PATH           = "data/temp"
+DATA_PATH                = "data/waymo"
+CAMERA_DATA_LOCAL_PATH   = os.path.join(DATA_PATH, "camera/data")
+CAMERA_LABELS_LOCAL_PATH = os.path.join(DATA_PATH, "camera/labels")
+POINT_CLOUD_LOCAL_PATH   = os.path.join(DATA_PATH, "lidar/point_clouds")
+CAMERA_PROJ_LOCAL_PATH   = os.path.join(DATA_PATH, "lidar/camera_projections")
+LASER_LABELS_LOCAL_PATH  = os.path.join(DATA_PATH, "lidar/labels")
+MAP_MASKS_LOCAL_PATH     = os.path.join(DATA_PATH, "map_features/masks")
+MAP_POLYLINES_LOCAL_PATH = os.path.join(DATA_PATH, "map_features/polylines")
+
 
 LOGGER = logging.getLogger(__name__)
+
 os.makedirs(TEMP_DATA_PATH, exist_ok=True)
 os.makedirs(DATA_PATH, exist_ok=True)
 os.makedirs(CAMERA_DATA_LOCAL_PATH, exist_ok=True)
@@ -457,16 +540,45 @@ async def run(other_kwargs: Optional[Dict[str, Any]]=None):
         sample_data, dset_category = await task
         data["data"][dset_category].update(sample_data)
 
-    save_training = asyncio.create_task(save_pickle_file(
-        data["data"]["training"], os.path.join(DATA_PATH, f"training.pickle")
+    waymo_metadata = {
+        "LABELS": {
+            "CAM_NAME_INDEX_LABELS": CAM_NAME_INDEX_LABELS,
+            "LASER_NAME_INDEX_LABELS": LASER_NAME_INDEX_LABELS,
+            "MAP_ELEMENT_LABEL_INDEXES": MAP_ELEMENT_LABEL_INDEXES,
+        },
+        "MAP_ELEMENTS":{
+            "ROAD_LINE_TYPES": ROAD_LINE_TYPES,
+            "ROAD_EDGE_TYPES": ROAD_EDGE_TYPES,
+            "LANE_TYPES": LANE_TYPES,
+            "CROSSWALK_TYPE": CROSSWALK_TYPE,
+            "STOP_SIGN_TYPE": STOP_SIGN_TYPE,
+            "DRIVEWAY_TYPE": DRIVEWAY_TYPE,
+            "DEFAULT": DEFAULT,
+        },
+        "PATHS": {
+            "CAMERA_DATA_PATH": CAMERA_DATA_LOCAL_PATH,
+            "CAMERA_LABELS_PATH": CAMERA_LABELS_LOCAL_PATH,
+            "POINT_CLOUD_PATH": POINT_CLOUD_LOCAL_PATH,
+            "CAMERA_PROJ_PATH": CAMERA_PROJ_LOCAL_PATH,
+            "LASER_LABELS_PATH": LASER_LABELS_LOCAL_PATH,
+            "MAP_MASKS_PATH": MAP_MASKS_LOCAL_PATH,
+            "MAP_POLYLINES_PATH": MAP_POLYLINES_LOCAL_PATH
+        }
+    }
+
+    save_training = asyncio.create_task(offload_to_executor(
+        save_pickle_file, data["data"]["training"], os.path.join(DATA_PATH, f"training.pickle"), executor_type="thread"
     ))
-    save_testing = asyncio.create_task(save_pickle_file(
-        data["data"]["testing"], os.path.join(DATA_PATH, f"testing.pickle")
+    save_testing = asyncio.create_task(offload_to_executor(
+        save_pickle_file, data["data"]["testing"], os.path.join(DATA_PATH, f"testing.pickle"), executor_type="thread"
     ))
-    save_validation = asyncio.create_task(save_pickle_file(
-        data["data"]["validation"], os.path.join(DATA_PATH, f"validation.pickle")
+    save_validation = asyncio.create_task(offload_to_executor(
+        save_pickle_file, data["data"]["validation"], os.path.join(DATA_PATH, f"validation.pickle"), executor_type="thread"
     ))
-    await asyncio.gather(save_training, save_testing, save_validation)
+    save_metadata = asyncio.create_task(offload_to_executor(
+        save_json_file, waymo_metadata, os.path.join(DATA_PATH, "metadata.json"), executor_type="thread"
+    ))
+    await asyncio.gather(save_training, save_testing, save_validation, save_metadata)
     
 
 

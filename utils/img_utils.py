@@ -43,7 +43,7 @@ def point_clouds_to_binary_bev_maps(
     if ndim == 2:
         point_clouds = point_clouds[None]
 
-    binary_map = torch.zeros(point_clouds.shape[0], *map_hw, dtype=torch.uint8, device=point_clouds.device)
+    binary_map = torch.zeros(point_clouds.shape[0], *map_hw, dtype=torch.float32, device=point_clouds.device)
     points = point_clouds[..., :2].clone()
     points[..., 0] = (points[..., 0] - x_min) / (x_max - x_min)
     points[..., 1] = (points[..., 1] - y_min) / (y_max - y_min)
@@ -145,7 +145,7 @@ def generate_occupancy_map(
             occ_map = cv2.fillPoly(occ_maps[didx, tidx], pts=[v], color=1)
             occ_maps[didx, tidx] = occ_map
 
-    occ_maps = occ_maps
+    occ_maps = occ_maps.astype(np.float32)
     occ_maps = torch.from_numpy(occ_maps)
     
     if point_clouds is not None:

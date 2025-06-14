@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from utils.io_utils import load_pickle_file
+from utils.io_utils import load_pickle_file, load_json_file
 from utils.img_utils import generate_occupancy_map
 from ._container import FrameData, MultiFrameData, BatchMultiFrameData
 from typing import Union, Dict, Any, Tuple, Optional, List
@@ -22,7 +22,8 @@ def check_perf(func):
 class WaymoDataset(Dataset):
     def __init__(
             self, 
-            data_or_path: Union[str, Dict[str, Any]], 
+            data_or_path: Union[str, Dict[str, Any]],
+            metadata_or_path: Union[str, Dict[str, Any]],
             motion_horizon: int=12,
             occupancy_horizon: int=5,
             planning_horizon: int=6,
@@ -30,9 +31,22 @@ class WaymoDataset(Dataset):
             cam_img_hw: Tuple[int, int]=(480, 640),
             num_cloud_points: int=100_000,
             xyz_range: Optional[List[Tuple[int, int]]] = None,
-            frames_per_sample: int=3,
+            frames_per_sample: int=4,
+            history_horizon_secs: Optional[float]=2.0,
+            max_num_agents: int=100,
+            max_num_map_elements: int=100,
+            max_num_polyline_points: int=1000,
         ):
-        self.data = data_or_path if isinstance(data_or_path, dict) else load_pickle_file(data_or_path)
+        self.data = (
+            data_or_path 
+            if isinstance(data_or_path, dict) 
+            else load_pickle_file(data_or_path)
+        )
+        self.metadata = (
+            metadata_or_path 
+            if isinstance(metadata_or_path, dict) 
+            else load_json_file(metadata_or_path)
+        )
         self.motion_horizon = motion_horizon
         self.occupancy_horizon = occupancy_horizon
         self.planning_horizon = planning_horizon
@@ -41,6 +55,10 @@ class WaymoDataset(Dataset):
         self.num_cloud_points = num_cloud_points
         self.xyz_range = xyz_range or [(-51.2, 51.2), (-51.2, 51.2), (-5.0, 3.0)]
         self.frames_per_sample = frames_per_sample
+        self.history_horizon_secs = history_horizon_secs
+        self.max_num_agents = max_num_agents
+        self.max_num_map_elements = max_num_map_elements
+        self.max_num_polyline_points = max_num_polyline_points
         
         self._set_data_len_and_indexes()
 
@@ -53,6 +71,7 @@ class WaymoDataset(Dataset):
             [(self._start_indexes[1:] - 1), [self._start_indexes[-1] + (sample_sizes[-1] - 1)]
         ], axis=0)
         self._data_len = sum(sample_sizes)
+
 
     @check_perf
     def _search_for_idx(self, idx: int) -> Tuple[str, int]:
@@ -83,6 +102,32 @@ class WaymoDataset(Dataset):
                 center_idx += math.ceil(op_len / 2)
                 continue
 
+    
+    @check_perf
+    def _sample_frame_indexes_from_horizon(self, sample_dict: Dict[str, Any], frame_idx: int) -> np.ndarray:
+        if not self.history_horizon_secs:
+            start = max(0, frame_idx - self.frames_per_sample + 1)
+            end = frame_idx + 1
+            return np.arange(start, end, step=1)
+
+        start_idx = frame_idx
+        current_timestep = sample_dict[frame_idx]["timestamp_seconds"]
+
+        while start_idx > max(0, frame_idx - self.frames_per_sample + 1):
+            prev_timestep = sample_dict[start_idx]["timestamp_seconds"]
+            if current_timestep - prev_timestep >= self.history_horizon_secs:
+                break
+            start_idx -= 1
+        
+        if start_idx == frame_idx:
+            return np.asarray([frame_idx])
+        
+        size = min(self.frames_per_sample, frame_idx - start_idx)
+        index_pool = np.random.choice(np.arange(start_idx, frame_idx, step=1), size=size, replace=False)
+        index_pool.sort()
+        index_pool = np.concatenate([index_pool, [frame_idx]], axis=0)
+        return index_pool
+
 
     def __len__(self) -> int:
         return self._data_len
@@ -92,12 +137,10 @@ class WaymoDataset(Dataset):
         sample_name, frame_idx = self._search_for_idx(idx)
         sample_dict = self.data[sample_name]
 
-        start = max(0, (idx - self.frames_per_sample) + 1)
-        end = idx + 1
-
         frames = []
-        for i in range(start, end):
-            frames.append(self._load_frame_data(sample_dict, frame_idx, is_partial_data=(i != idx)))
+        frame_indexes = self._sample_frame_indexes_from_horizon(sample_dict, frame_idx)
+        for i in frame_indexes:
+            frames.append(self._load_frame_data(sample_dict, i, is_partial_data=(i != frame_idx)))
         return MultiFrameData.from_framedata_list(frames)
 
 
@@ -107,10 +150,10 @@ class WaymoDataset(Dataset):
         cam_views = self._load_cam_views(frame_dict)
         point_cloud = self._load_point_cloud(frame_dict)
         laser_detections = self._load_laser_labels(frame_dict)
+        ego_pose, cam_intrinsic, cam_extrinsic = self._load_ego_pose_and_transforms(
+            frame_dict, only_pose=is_partial_data
+        )
         
-        ego_pose = None
-        cam_intrinsic = None
-        cam_extrinsics = None
         motion_tracks = None
         occupancy_map = None
         map_elements_mask = None
@@ -120,12 +163,39 @@ class WaymoDataset(Dataset):
         motion_tracks = None
 
         if not is_partial_data:
-            ego_pose, cam_intrinsic, cam_extrinsics = self._load_ego_pose_and_transforms(frame_dict)
             motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
             occupancy_map = self._generate_occupancy_map(motion_tracks)
             map_elements_mask, map_elements_polylines, map_elements_labels = self._load_bev_map_elements(frame_dict)
             ego_trajectory = self._get_planning_trajectory(sample_dict, frame_idx, ego_pose)
             motion_tracks = motion_tracks[:, 1:, :2]
+
+            # pad targets
+            elements_pad = self.max_num_map_elements - map_elements_polylines.shape[0]
+            points_pad = self.max_num_polyline_points - map_elements_polylines.shape[1]
+            agents_pad = self.max_num_agents - motion_tracks.shape[0]
+            ego_plan_pad = self.planning_horizon - ego_trajectory.shape[0]
+            map_label_pad_val = len(self.metadata["LABELS"]["MAP_ELEMENT_LABEL_INDEXES"])
+            map_point_pad_val = map_elements_polylines[-1, -1, -1]
+            
+            map_elements_polylines = F.pad(
+                map_elements_polylines, pad=(0, 0, 0, points_pad, 0, elements_pad), mode="constant", value=map_point_pad_val
+            )
+            map_elements_labels = F.pad(
+                map_elements_labels, pad=(0, elements_pad), mode="constant", value=map_label_pad_val
+            )
+            motion_tracks = F.pad(
+                motion_tracks, pad=(0, 0, 0, 0, 0, agents_pad), mode="constant", value=-999
+            )
+            occupancy_map = F.pad(
+                occupancy_map, pad=(0, 0, 0, 0, 0, 0, 0, agents_pad), mode="constant", value=-999
+            )
+
+            ego_trajectory = F.pad(
+                ego_trajectory, pad=(0, 0, 0, ego_plan_pad), mode="constant", value=-999
+            )
+        
+        det_pad = self.max_num_agents - laser_detections.shape[0]
+        laser_detections = F.pad(laser_detections, pad=(0, 0, 0, det_pad), mode="constant", value=-999)
 
         return FrameData(
             cam_views=cam_views,
@@ -133,7 +203,7 @@ class WaymoDataset(Dataset):
             ego_pose=ego_pose,
             laser_detections=laser_detections,
             cam_intrinsic=cam_intrinsic,
-            cam_extrinsics=cam_extrinsics,
+            cam_extrinsic=cam_extrinsic,
             motion_tracks=motion_tracks,
             occupancy_map=occupancy_map,
             map_elements_mask=map_elements_mask,
@@ -180,7 +250,7 @@ class WaymoDataset(Dataset):
                 track_maps[obj_id].append(obj_det)
         # NOTE: Nested tensors is experimental feature and may change behaviour in the future
         # shape: (num_detections, motion_timesteps, 8)
-        tracks = torch.nested.nested_tensor(list(track_maps.values())).to_padded_tensor(0)
+        tracks = torch.nested.nested_tensor(list(track_maps.values())).to_padded_tensor(-999)
         return tracks
 
     
@@ -235,8 +305,6 @@ class WaymoDataset(Dataset):
                 or (obj_3d_bbox["center_z"] < self.xyz_range[2][0] or obj_3d_bbox["center_z"] > self.xyz_range[2][1])
             ): continue
             obj_3d_dets.append([
-                0,
-                0,
                 obj_3d_bbox["center_x"],
                 obj_3d_bbox["center_y"],
                 obj_3d_bbox["center_z"],
@@ -247,29 +315,31 @@ class WaymoDataset(Dataset):
                 laser_labels_list[obj_idx]["type"]
             ])
         obj_3d_dets = torch.tensor(obj_3d_dets, dtype=torch.float32)
-        # shape: (num_objs, 8)
+        # shape: (num_detections, 8)
         return obj_3d_dets
 
     
     @check_perf
-    def _load_ego_pose_and_transforms(self, frame_dict: Dict[str, Any]) -> Tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor
+    def _load_ego_pose_and_transforms(self, frame_dict: Dict[str, Any], only_pose: bool=False) -> Tuple[
+        torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
     ]:
         ego_pose = torch.from_numpy(frame_dict["ego_pose"])
+        if only_pose:
+            return ego_pose, None, None
         cam_intrinsic_dict = frame_dict["camera_proj_matrix"]["intrinsic"]
-        cam_extrinsics_dict = frame_dict["camera_proj_matrix"]["extrinsic"]
+        cam_extrinsic_dict = frame_dict["camera_proj_matrix"]["extrinsic"]
         cam_keys = sorted(list(cam_intrinsic_dict.keys()))
         cam_intrinsic = []
-        cam_extrinsics = []
+        cam_extrinsic = []
 
         for cam in cam_keys:
             cam_intrinsic.append(cam_intrinsic_dict[cam])
-            cam_extrinsics.append(cam_extrinsics_dict[cam])
+            cam_extrinsic.append(cam_extrinsic_dict[cam])
 
         cam_intrinsic = torch.from_numpy(np.stack(cam_intrinsic, axis=0))
-        cam_extrinsics = torch.from_numpy(np.stack(cam_extrinsics, axis=0))
+        cam_extrinsic = torch.from_numpy(np.stack(cam_extrinsic, axis=0))
         # shape: (4, 4), (3, 3), (4, 4), (4, 4) respectively
-        return ego_pose, cam_intrinsic, cam_extrinsics
+        return ego_pose, cam_intrinsic, cam_extrinsic
 
 
     @check_perf
@@ -292,16 +362,25 @@ class WaymoDataset(Dataset):
         polylines = polylines.reshape(polylines.shape[0], polylines.shape[1] // 2, 2)
         eos_mask = polylines == eos_token
         pad_mask = polylines == pad_token
-        xy_scale_ratio = [self.bev_map_hw[1], self.bev_map_hw[0]] / np.asarray([mask.shape[2], mask.shape[1]])
+
+        scale_numer = np.asarray([self.bev_map_hw[1], self.bev_map_hw[0]]) - 1
+        scale_denom = np.asarray([mask.shape[2], mask.shape[1]]) - 1
+        xy_scale_ratio = scale_numer / scale_denom
+
         polylines = np.floor(polylines * xy_scale_ratio).astype(int)
         polylines[eos_mask] = eos_token
         polylines[pad_mask] = pad_token
 
         mask = torch.from_numpy(mask)
         polylines = torch.from_numpy(polylines)
+        labels = torch.from_numpy(labels)
         
         if mask.shape[1] != self.bev_map_hw[0] or mask.shape[2] != self.bev_map_hw[1]:
             mask = F.interpolate(mask[None], size=self.bev_map_hw, mode="bilinear")[0]
+        
+        # mask shape: (1, H_bev, W_bev)
+        # polylines: (num_elements, num_points, 2)
+        # labels: (num_elements, )
         return mask, polylines, labels
     
 
@@ -332,5 +411,5 @@ class WaymoDataset(Dataset):
     
     
     @staticmethod
-    def collate_fn(batch: List[MultiFrameData]) -> BatchMultiFrameData:
-        return BatchMultiFrameData.from_multiframedata_list(batch)
+    def collate_fn(batch: List[MultiFrameData], frames_per_sample: int) -> BatchMultiFrameData:
+        return BatchMultiFrameData.from_multiframedata_list(batch, frames_per_sample)

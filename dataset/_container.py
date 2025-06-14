@@ -27,16 +27,16 @@ class FrameData(DeviceChangeMixin):
         for reflectance r.
 
     laser_detections: This tensor contains objects / agents detected with the LIDAR sensors as 3D bounding boxes mapped
-        to the ego vehicle frame. The tensor is of shape [Nd_lidar, 10], where Nd_lidar is the number of unique objects 
+        to the ego vehicle frame. The tensor is of shape [Nd_lidar, 8], where Nd_lidar is the number of unique objects 
         detected across the LIDAR sensors, and each index of the second dimension corresponds to:
-        [batch_index, frame_index, center_x, center_y, center_z, length, width, height, heading_angle(rad), object_type]
+        [center_x, center_y, center_z, length, width, height, heading_angle(rad), object_type]
 
     ego_pose: A [4, 4] transformation matrix to rotate relative coordinates of global frame to ego vehicle frame
 
     cam_intrinsic: A 3 x 3 projection matrix for each camera to map from 3D camera frame to 2D image frame.
         The tensor is of shape [V_cam, 3, 3]
 
-    cam_extrinsics: A 4 x 4 projection matrix for each camera to map from camera frame to ego vehicle frame.
+    cam_extrinsic: A 4 x 4 projection matrix for each camera to map from camera frame to ego vehicle frame.
         The tensor is of shape [V_cam, 4, 4]
 
     motion_tracks: This tensor contains the movement trajectory of dynamic agents in a given frame from timestep t to an
@@ -64,9 +64,9 @@ class FrameData(DeviceChangeMixin):
     cam_views: torch.Tensor
     point_cloud: torch.Tensor
     laser_detections: torch.Tensor
-    ego_pose: Optional[torch.Tensor] = None
+    ego_pose: torch.Tensor
     cam_intrinsic: Optional[torch.Tensor] = None
-    cam_extrinsics: Optional[torch.Tensor] = None
+    cam_extrinsic: Optional[torch.Tensor] = None
     motion_tracks: Optional[torch.Tensor] = None
     occupancy_map: Optional[torch.Tensor] = None
     map_elements_mask: Optional[torch.Tensor] = None
@@ -87,9 +87,9 @@ class MultiFrameData(FrameData):
             cam_views = [],
             point_cloud = [],
             laser_detections = [],
-            ego_pose = frames[-1].ego_pose,
+            ego_pose = [],
             cam_intrinsic = frames[-1].cam_intrinsic,
-            cam_extrinsics = frames[-1].cam_extrinsics,
+            cam_extrinsic = frames[-1].cam_extrinsic,
             motion_tracks = frames[-1].motion_tracks,
             occupancy_map = frames[-1].occupancy_map,
             map_elements_mask = frames[-1].map_elements_mask,
@@ -102,13 +102,13 @@ class MultiFrameData(FrameData):
             frame = frames[frame_idx]
             sample_dict["cam_views"].append(frame.cam_views)
             sample_dict["point_cloud"].append(frame.point_cloud)
-            laser_detections = frame.laser_detections
-            laser_detections[:, 1] = frame_idx
-            sample_dict["laser_detections"].append(laser_detections)
+            sample_dict["ego_pose"].append(frame.ego_pose)
+            sample_dict["laser_detections"].append(frame.laser_detections)
         
         sample_dict["cam_views"] = torch.stack(sample_dict["cam_views"], dim=0)
         sample_dict["point_cloud"] = torch.stack(sample_dict['point_cloud'], dim=0)
-        sample_dict["laser_detections"] = torch.concat(sample_dict["laser_detections"], dim=0)
+        sample_dict["laser_detections"] = torch.stack(sample_dict["laser_detections"], dim=0)
+        sample_dict["ego_pose"] = torch.stack(sample_dict["ego_pose"], dim=0)
         return cls(**sample_dict)
 
 
@@ -117,17 +117,28 @@ class MultiFrameData(FrameData):
 class BatchMultiFrameData(FrameData):
     """
     This class stores a batch of multiple frame data
+
+    :timestep_mask: This tensor stores a padding mask for timesteps, it is of shape (batch_size, timesteps)
+        if the frame at the corresponding timestep is a padding tensor, then timestep_mask[batch_idx, frame_idx]
+        will be set to 0, else 1.
     """
+    timestep_pad_mask: Optional[torch.Tensor]=None
 
     @classmethod
-    def from_multiframedata_list(cls, multi_frames: List[MultiFrameData]) -> "BatchMultiFrameData":
+    def from_multiframedata_list(
+        cls, 
+        multi_frames: List[MultiFrameData], 
+        frames_per_sample: int
+        ) -> "BatchMultiFrameData":
+        
         batch_dict = dict(
+            timestep_pad_mask = [],
             cam_views = [],
             point_cloud = [],
             laser_detections = [],
             ego_pose = [],
             cam_intrinsic = [],
-            cam_extrinsics = [],
+            cam_extrinsic = [],
             motion_tracks = [],
             occupancy_map = [],
             map_elements_mask = [],
@@ -135,21 +146,32 @@ class BatchMultiFrameData(FrameData):
             map_elements_labels = [],
             ego_trajectory = []
         )
-
-        # TODO: Work on integrating map_elements_polylines and map_elements_labels data to batch
+        
+        items_to_pad = ["cam_views", "point_cloud", "ego_pose"]
 
         for sample_idx in range(0, len(multi_frames)):
+
             for key in batch_dict:
-                batch_dict[key].append(getattr(multi_frames[sample_idx], key))
+                if key == "timestep_pad_mask":
+                    continue
+
+                if key in items_to_pad:
+                    data = getattr(multi_frames[sample_idx], key)
+                    pad_size = frames_per_sample - data.shape[0]
+                    
+                    tmask = torch.zeros(frames_per_sample, dtype=torch.bool)
+                    tmask[pad_size:] = True
+
+                    if pad_size > 0:
+                        pad_data = torch.zeros_like(data[0])[None].tile(pad_size, *[1 for _ in range(0, data.ndim-1)])
+                        data = torch.concat([pad_data, data], dim=0)
+                    batch_dict[key].append(data)
+                    batch_dict["timestep_pad_mask"].append(tmask)
+
+                else:
+                    batch_dict[key].append(getattr(multi_frames[sample_idx], key))
         
         for key in batch_dict:
-            if key == "laser_detections":
-                batch_dict[key] = torch.concat(batch_dict[key], dim=0)
-
-            elif key == "motion_tracks" or key == "occupancy_map" or key == "ego_trajectory":
-                batch_dict[key] = torch.nested.nested_tensor(batch_dict[key], layout=torch.jagged)
-                
-            else:
-                batch_dict[key] = torch.stack(batch_dict[key], dim=0)
+            batch_dict[key] = torch.stack(batch_dict[key], dim=0)
         
         return cls(**batch_dict)
