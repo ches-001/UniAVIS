@@ -714,8 +714,9 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
 
             NOTE: By convention, the extrinsic matrix maps from vehicle coordinate frame to sensor
                 coordinate frame, but somehow it is the reverse in the case of waymo data, hence the reason the projection matrix
-                is a product of intrinsic and extrinsic-inverse instead of intrinsic and extrinsic. If by any chance you use this
-                on a different dataset, like NuScenes for example, do ensure to stick to their own convention.
+                is a product of intrinsic and extrinsic-inverse instead of intrinsic and extrinsic (check out section 3.2 of the
+                paper: https://arxiv.org/pdf/1912.04838). If by any chance you use this on a different dataset, like NuScenes 
+                for example, do ensure to stick to their own convention.
 
         Returns
         --------------------------------
