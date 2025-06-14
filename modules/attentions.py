@@ -710,8 +710,12 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
 
         :cam_proj_matrices: (V, 3, 4) projection matrix for each camera, from real 3D coord (ego vehicle frame) to 3D image
             coord. This matrix is the product of the 3 x 3 (homogenized to 3 x 4) camera intrinsic matrix and the 4 x 4 camera
-            camera extrinsic matrix. Do note that the 4 x 4 extrinsic matrix could be 3 x 4 and the intrinsic left as a 3 x 3, 
-            but this non-homogeneous and not directly invertible.
+            camera extrinsic-inverse matrix with homogenized coordinates.
+
+            NOTE: By convention, the extrinsic matrix maps from vehicle coordinate frame to sensor
+                coordinate frame, but somehow it is the reverse in the case of waymo data, hence the reason the projection matrix
+                is a product of intrinsic and extrinsic-inverse instead of intrinsic and extrinsic. If by any chance you use this
+                on a different dataset, like NuScenes for example, do ensure to stick to their own convention.
 
         Returns
         --------------------------------
