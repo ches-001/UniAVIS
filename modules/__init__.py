@@ -30,4 +30,8 @@ PAPERS:
 14. Scalability in Perception for Autonomous Driving: Waymo Open Dataset
 
 15. VectorMapNet: End-to-end Vectorized HD Map Learning
+
+16. Enhancing Geometric Factors in Model Learning and Inference for Object Detection and Instance Segmentation
+
+17. HDMapNet: An Online HD Map Construction and Evaluation Framework
 """

@@ -4,12 +4,13 @@ from .base import BaseFormer
 from .trackformer import TrackFormer, TrackFormerDecoderLayer
 from .common import (
     ProtoSegModule, 
-    RasterMapCoefHead, 
+    RasterMapDetectionHead, 
     PosEmbedding1D, 
     SimpleMLP, 
     AddNorm
 )
 from .attentions import DeformableAttention, MultiHeadedAttention
+from utils.img_utils import xyxy_to_xywh
 from typing import Optional, Tuple, Union
 
 
@@ -110,8 +111,6 @@ class PolyLineGeneratorLayer(nn.Module):
         ctx_queries       = torch.unflatten(ctx_queries, dim=1, sizes=queries.shape[1:3])
         
         ctx_queries = self.mlp(ctx_queries)
-        if self.mask_out_ctx and query_mask is not None:
-            ctx_queries = torch.masked_fill(ctx_queries, query_mask, value=0.0)
         return ctx_queries
 
 
@@ -143,10 +142,10 @@ class VectorMapFormer(BaseFormer):
     """
     def __init__(
             self,
-            num_heads: int, 
-            embed_dim: int,
-            num_layers: int,
             num_classes: int,
+            num_heads: int=8, 
+            embed_dim: int=256,
+            num_layers: int=4,
             num_ref_points: int=4,
             dim_feedforward: int=512, 
             dropout: float=0.1,
@@ -158,10 +157,10 @@ class VectorMapFormer(BaseFormer):
         ):
         super(VectorMapFormer, self).__init__()
 
+        self.num_classes     = num_classes
         self.num_heads       = num_heads
         self.embed_dim       = embed_dim
         self.num_layers      = num_layers
-        self.num_classes     = num_classes
         self.num_ref_points  = num_ref_points
         self.dim_feedforward = dim_feedforward
         self.dropout         = dropout
@@ -252,6 +251,9 @@ class VectorMapFormer(BaseFormer):
                     queries, bev_features, ref_points, padding_mask, attn_mask
                 )
                 continue
+            # in inference one token is predicted at a time so we only take the last token prediction.
+            # During training and eval, all tokens are predicted together, so we select all tokens, with
+            # the exception of the starter tokens (i.e, the keypoints embedding token and the classification token)
             cutoff = -1 if self.inference_mode else (self.num_bbox_kps * 2) + 1
             queries = queries[..., cutoff:, :]
 
@@ -264,7 +266,7 @@ class VectorMapFormer(BaseFormer):
             tgt_kps: Optional[torch.LongTensor]=None,
             tgt_classes: Optional[torch.LongTensor]=None,
             tgt_vertices: Optional[torch.LongTensor]=None,
-        ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Input
         --------------------------------
@@ -286,10 +288,8 @@ class VectorMapFormer(BaseFormer):
         :polylines | polyline_logits: (N, num_elements, num_vertices, 2) | (N, num_elements, num_vertices, 2, num_grid),
             Contains either class labels of class logits depending on whether inference mode has been set or not 
             
-        :box_kps: (N, num_elements, num_kp, 2), Keypoints that define the box that encloses the polyline
-
-        :classes | class logits: (N, num_elements) | (N, num_elements, num_classes), Predicted class labels or class logits
-            depending on whether inference mode has been set or not 
+        :detections: (N, num_elements, (num_kp * 2) + num_classes), this is a combination of predicted box keypoints 
+            and class logits
         """
 
         batch_size = bev_features.shape[0]
@@ -311,7 +311,6 @@ class VectorMapFormer(BaseFormer):
         # class_logits shape: (N, max_elements, num_classes)
         bbox_kps     = self.bbox_kp_head(kps_queries)
         class_logits = self.bbox_class_head(torch.flatten(kps_queries, start_dim=2, end_dim=3))
-        classes      = torch.argmax(class_logits, dim=-1)
 
         # class_emb        : (N, max_elements, 1, d)
         # kps_vertex_emb   : (N, max_elements, k, 2, d)
@@ -330,6 +329,7 @@ class VectorMapFormer(BaseFormer):
         if tgt_classes is not None:
             class_embs = self.class_emb(tgt_classes)
         else:
+            classes    = torch.argmax(class_logits, dim=-1)
             class_embs = self.class_emb(classes)
 
         class_embs = class_embs[:, :, None, :]         
@@ -346,17 +346,20 @@ class VectorMapFormer(BaseFormer):
         global_context = torch.concat([class_embs, kps_emb], dim=2)
         input_queries  = global_context
 
+        bbox_kps = torch.flatten(bbox_kps, start_dim=2, end_dim=3)
+        bbox_xywh = xyxy_to_xywh(bbox_kps)
+        detections = torch.concat([bbox_xywh, class_logits], dim=-1)
         if not self.inference_mode:
             assert tgt_vertices is not None
-            map_queries, polyline_logits = self._forward_body(
+            map_queries, polyline_logits = self._train_forward(
                 input_queries, tgt_vertices, bev_features, coord_emb, ref_points
             )
-            return map_queries, polyline_logits, bbox_kps, class_logits
+            return map_queries, polyline_logits, detections
         else:
-            map_queries, polylines = self._inference_body(input_queries, bev_features, coord_emb, ref_points)
-            return map_queries, polylines, bbox_kps, classes
+            map_queries, polylines = self._inference_forward(input_queries, bev_features, coord_emb, ref_points)
+            return map_queries, polylines, detections
         
-    def _forward_body(
+    def _train_forward(
             self, 
             input_queries: torch.Tensor,
             tgt_vertices: torch.Tensor, 
@@ -393,7 +396,7 @@ class VectorMapFormer(BaseFormer):
         polyline_logits = torch.unflatten(polyline_logits, dim=2, sizes=(-1, 2))
         return map_queries, polyline_logits
     
-    def _inference_body(
+    def _inference_forward(
             self,
             input_queries: torch.Tensor,
             bev_features: torch.Tensor, 
@@ -468,17 +471,14 @@ class RasterMapFormer(TrackFormer):
             c_h=seg_c_h, 
         )
 
-        self.detection_module = RasterMapCoefHead(
+        self.detection_module = RasterMapDetectionHead(
             embed_dim=self.embed_dim, 
             num_classes=self.num_classes, 
             num_coefs=self.num_seg_coeffs
         )
+        del self.det_3d, self.ego_query_emb
 
-    def forward(
-            self, 
-            bev_features: torch.Tensor, 
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    def forward(self, bev_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Input
         --------------------------------
@@ -486,32 +486,51 @@ class RasterMapFormer(TrackFormer):
 
         Returns
         --------------------------------
-        NOTE: (det_params = 8 or 5). For det_params = 8, we have:
-            [center_x, center_y, center_z, length, width, height, heading_angle, class_label].
-            For det_params = 4, we have [center_x, center_y, length, width, class_label]
-
         :queries: (N, num_queries, embed_dim) context queries for each map element from the last decoder layer
 
-        :seg_masks: (num_layers, N, num_queries, H_bev, W_bev) | (N, num_queries, H_bev, W_bev), element segmentations. 
-            If not in inference mode, this tensor contains all segmentation masks across all decoder layers, if in 
-            inference mode, the returned mask corresponds only to the last decoder layer.
+        :protos: (k, H_bev, W_bev), where k is the number of segmentation coefficients. 
+            NOTE: This tensor is usually matrix multiplied with the k coefficient queries of n objects:
+            (n, k) x (k, H_bev, W_bev) to produce an output of shape (n, H_bev, W_bev). The reason this
+            multiplication is not done in this forward method is because a lot of predictions will be 
+            dropped, both during training and inference, so only the predictions pertaining to valid 
+            detections are used, hence no need for the wasted computation (probably sounds rich coming from me).
 
-        :logits: (num_layers, N, num_queries, 1 + num_classes) | (N, num_queries, 1 + num_classes), tensor contains 
-            confidence scores and classes logits for each element
+        :detections: (num_layers, N, num_queries, 4 + k + num_classes) | (N, num_queries, 4 + k + num_classes), tensor 
+            contains confidence scores and classes logits for each element
         """
+
+        assert bev_features.shape[-1] == self.embed_dim
+
         batch_size = bev_features.shape[0]
+        queries    = self.detection_pos_emb().tile(batch_size, 1, 1)
+        
+        ref_points = DeformableAttention.generate_standard_ref_points(
+            self.bev_feature_hw,
+            batch_size=batch_size, 
+            device=bev_features.device, 
+            normalize=True,
+            n_sample=queries.shape[1]
+        )
+        ref_points = ref_points[:, :, None, :]
 
         protos = self.proto_seg_module(
             bev_features.permute(0, 2, 1).reshape(batch_size, self.embed_dim, *self.bev_feature_hw)
         )
-        queries, detections = super(RasterMapFormer, self).forward(bev_features)
-
-        coefs  = detections[..., 1:1+self.num_seg_coeffs]
-        logits = torch.concat([detections[..., 0:1], detections[..., 1+self.num_seg_coeffs:]], dim=-1)
-
-        if not self.inference_mode:
-            seg_masks = torch.einsum("lnast,tnshw->lnahw", coefs[..., None], protos[None])        
-        else:
-            seg_masks  = torch.einsum("nast,nshw->nahw", coefs[..., None], protos)
-
-        return queries, seg_masks, logits
+        
+        layers_detections = []
+        
+        for decoder_idx in range(0, len(self.decoder_modules)):
+            queries = self.decoder_modules[decoder_idx](
+                queries=queries,
+                bev_features=bev_features,
+                ref_points=ref_points,
+            )
+            
+            if self.inference_mode:
+                if decoder_idx == self.num_layers - 1:
+                    return queries, protos, self.detection_module(queries)
+            else:
+                layers_detections.append(self.detection_module(queries))
+            
+        layers_detections = torch.stack(layers_detections, dim=0)
+        return queries, protos, layers_detections

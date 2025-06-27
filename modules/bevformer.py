@@ -5,7 +5,7 @@ from .base import BaseFormer
 from .backbone import ResNetBackBone
 from .attentions import TemporalSelfAttention, SpatialCrossAttention
 from .common import AddNorm, PosEmbedding2D, SimpleMLP
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple, Type, Union
     
 
 class BEVFormerEncoderLayer(nn.Module):
@@ -122,7 +122,7 @@ class BEVFormer(BaseFormer):
     def __init__(
             self, 
             in_img_channels: int=3,
-            bb_block: Type = resnet.BasicBlock,
+            bb_block: Union[str, Type] = resnet.BasicBlock,
             bb_block_layers: Tuple[int, int, int, int]=(3, 4, 6, 3),
             num_layers: int=6,
             num_heads: int=8, 
@@ -143,7 +143,7 @@ class BEVFormer(BaseFormer):
         super(BEVFormer, self).__init__()
     
         self.in_img_channels   = in_img_channels
-        self.bb_block          = bb_block
+        self.bb_block          = getattr(resnet, bb_block) if isinstance(bb_block, str) else bb_block
         self.bb_block_layers   = bb_block_layers
         self.num_layers        = num_layers
         self.num_heads         = num_heads

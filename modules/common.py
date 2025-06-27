@@ -292,7 +292,7 @@ class PosEmbedding2D(nn.Module):
         embs       = x_pos_embs + y_pos_embs    
 
         if flatten:
-            embs = embs.permute(0, 2, 3, 1).reshape(1, -1, embs.shape[1])
+            embs = embs.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)
         return embs
     
 
@@ -351,11 +351,13 @@ class DetectionHead(nn.Module):
 
         self.inception_module = nn.Sequential(
             nn.Linear(self.embed_dim, self.embed_dim),
-            nn.ReLU(),
         )
-        self.obj_module            = nn.Linear(self.embed_dim, 1)
-        self.loc_module            = nn.Linear(self.embed_dim, 8 if self.det_3d else 5)
-        self.classification_module = nn.Linear(self.embed_dim, self.num_classes)
+        self.loc_module   = nn.Sequential(
+            nn.Linear(self.embed_dim, 6 if self.det_3d else 4),
+            nn.Sigmoid()
+        )
+        self.angle_module = nn.Linear(self.embed_dim, 1)
+        self.cls_module   = nn.Linear(self.embed_dim, self.num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -365,41 +367,43 @@ class DetectionHead(nn.Module):
 
         Returns
         --------------------------------
-        :output: (N, max_objs, det_params) (det_params = num_classes + (8 or 5)). For detections = num_classes + 8, 
-            we have: [obj_score, center_x, center_y, center_z, length, width, height, heading_angle, [classes]].
-            For det_params = num_classes + 5, we have [obj_score, center_x, center_y, length, width, [[classes]]]
+        :output: (N, max_objs, det_params) (det_params = num_classes + (7 or 5)). For detections = num_classes + 8, 
+            we have: [center_x, center_y, center_z, length, width, height, heading_angle, [classes]].
+            For det_params = num_classes + 6, we have [center_x, center_y, length, width, heading_angle, [[classes]]]
 
         """
-        out       = self.inception_module(x)
-        obj_score = self.obj_module(out)
-        loc       = self.loc_module(out)
-        classification = self.classification_module(out)
-        output = torch.concat([obj_score, loc, classification], dim=-1)
+        out    = self.inception_module(x)
+        loc    = self.loc_module(out)
+        angle  = self.angle_module(out)
+        cls    = self.cls_module(out)
+        output = torch.concat([loc, angle, cls], dim=-1)
         return output
     
 
-class RasterMapCoefHead(nn.Module):
+class RasterMapDetectionHead(nn.Module):
     def __init__(
             self, 
             embed_dim: int, 
             num_classes: int, 
             num_coefs: int=None
         ):
-        super(RasterMapCoefHead, self).__init__()
+        super(RasterMapDetectionHead, self).__init__()
         self.embed_dim        = embed_dim
         self.num_classes      = num_classes
         self.num_coefs        = num_coefs
 
         self.inception_module = nn.Sequential(
             nn.Linear(self.embed_dim, self.embed_dim),
-            nn.ReLU(),
         )
-        self.obj_module            = nn.Linear(self.embed_dim, 1)
-        self.classification_module = nn.Linear(self.embed_dim, self.num_classes)
-        self.seg_coef_module       = nn.Sequential(
+        self.loc_module       = nn.Sequential(
+            nn.Linear(self.embed_dim, 4),
+            nn.Sigmoid()
+        )
+        self.seg_coef_module  = nn.Sequential(
             nn.Linear(self.embed_dim, num_coefs),
             nn.Tanh()
         )
+        self.cls_module       = nn.Linear(self.embed_dim, self.num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -409,14 +413,14 @@ class RasterMapCoefHead(nn.Module):
 
         Returns
         --------------------------------
-        :output: (N, max_objs, 1 + seg_coefs + num_classes)
+        :output: (N, max_objs, 4, seg_coefs + num_classes)
 
         """
-        out       = self.inception_module(x)
-        obj_score = self.obj_module(out)
-        classification = self.classification_module(out)
-        seg_coefs = self.seg_coef_module(out)
-        output = torch.concat([obj_score, seg_coefs, classification], dim=-1)
+        out    = self.inception_module(x)
+        loc    = self.loc_module(out)
+        coefs  = self.seg_coef_module(out)
+        cls    = self.cls_module(out)
+        output = torch.concat([loc, coefs, cls], dim=-1)
         return output
     
 

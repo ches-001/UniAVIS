@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from utils.io_utils import load_pickle_file, load_json_file
 from utils.img_utils import generate_occupancy_map
+from utils.img_utils import polyline_2_xywh
 from ._container import FrameData, MultiFrameData, BatchMultiFrameData
 from typing import Union, Dict, Any, Tuple, Optional, List
 
@@ -30,12 +31,14 @@ class WaymoDataset(Dataset):
             bev_map_hw: Tuple[int, int]=(200, 200),
             cam_img_hw: Tuple[int, int]=(480, 640),
             num_cloud_points: int=100_000,
-            xyz_range: Optional[List[Tuple[int, int]]] = None,
+            xyz_range: Optional[List[Tuple[float, float]]]=None,
             frames_per_sample: int=4,
-            history_horizon_secs: Optional[float]=2.0,
+            sample_period_secs: Optional[float]=2.0,
             max_num_agents: int=100,
             max_num_map_elements: int=100,
             max_num_polyline_points: int=1000,
+            motion_sample_freq: float=2.0,
+            pad_polylines_out_of_index: bool=False
         ):
         self.data = (
             data_or_path 
@@ -55,10 +58,12 @@ class WaymoDataset(Dataset):
         self.num_cloud_points = num_cloud_points
         self.xyz_range = xyz_range or [(-51.2, 51.2), (-51.2, 51.2), (-5.0, 3.0)]
         self.frames_per_sample = frames_per_sample
-        self.history_horizon_secs = history_horizon_secs
+        self.sample_period_secs = sample_period_secs
         self.max_num_agents = max_num_agents
         self.max_num_map_elements = max_num_map_elements
         self.max_num_polyline_points = max_num_polyline_points
+        self.motion_sample_freq = motion_sample_freq
+        self.pad_polylines_out_of_index = pad_polylines_out_of_index
         
         self._set_data_len_and_indexes()
 
@@ -105,7 +110,7 @@ class WaymoDataset(Dataset):
     
     @check_perf
     def _sample_frame_indexes_from_horizon(self, sample_dict: Dict[str, Any], frame_idx: int) -> np.ndarray:
-        if not self.history_horizon_secs:
+        if not self.sample_period_secs:
             start = max(0, frame_idx - self.frames_per_sample + 1)
             end = frame_idx + 1
             return np.arange(start, end, step=1)
@@ -115,7 +120,7 @@ class WaymoDataset(Dataset):
 
         while start_idx > max(0, frame_idx - self.frames_per_sample + 1):
             prev_timestep = sample_dict[start_idx]["timestamp_seconds"]
-            if current_timestep - prev_timestep >= self.history_horizon_secs:
+            if current_timestep - prev_timestep >= self.sample_period_secs:
                 break
             start_idx -= 1
         
@@ -138,50 +143,58 @@ class WaymoDataset(Dataset):
         sample_dict = self.data[sample_name]
 
         frames = []
+        obj_id_map = {}
         frame_indexes = self._sample_frame_indexes_from_horizon(sample_dict, frame_idx)
         for i in frame_indexes:
-            frames.append(self._load_frame_data(sample_dict, i, is_partial_data=(i != frame_idx)))
+            frames.append(self._load_frame_data(
+                sample_dict, i, is_partial_data=(i != frame_idx), obj_id_map=obj_id_map
+            ))
         return MultiFrameData.from_framedata_list(frames)
 
 
-    def _load_frame_data(self, sample_dict: Dict[str, Any], frame_idx: int, is_partial_data: bool) -> FrameData:
+    def _load_frame_data(
+            self, 
+            sample_dict: Dict[str, Any], 
+            frame_idx: int, 
+            is_partial_data: bool, 
+            obj_id_map: Dict[str, int]
+
+        ) -> FrameData:
         frame_dict = sample_dict[frame_idx]
 
         cam_views = self._load_cam_views(frame_dict)
         point_cloud = self._load_point_cloud(frame_dict)
-        laser_detections = self._load_laser_labels(frame_dict)
+        laser_detections = self._load_laser_labels(frame_dict, obj_id_map=obj_id_map)
         ego_pose, cam_intrinsic, cam_extrinsic = self._load_ego_pose_and_transforms(
             frame_dict, only_pose=is_partial_data
-        )
-        
+        )            
+
         motion_tracks = None
         occupancy_map = None
-        map_elements_mask = None
         map_elements_polylines = None
-        map_elements_labels = None
+        map_elements_boxes = None
         ego_trajectory = None
         motion_tracks = None
 
         if not is_partial_data:
             motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
             occupancy_map = self._generate_occupancy_map(motion_tracks)
-            map_elements_mask, map_elements_polylines, map_elements_labels = self._load_bev_map_elements(frame_dict)
             ego_trajectory = self._get_planning_trajectory(sample_dict, frame_idx, ego_pose)
+            map_elements_polylines, map_elements_boxes = self._load_bev_map_elements(frame_dict)
             motion_tracks = motion_tracks[:, 1:, :2]
 
             # pad targets
-            elements_pad = self.max_num_map_elements - map_elements_polylines.shape[0]
-            points_pad = self.max_num_polyline_points - map_elements_polylines.shape[1]
-            agents_pad = self.max_num_agents - motion_tracks.shape[0]
-            ego_plan_pad = self.planning_horizon - ego_trajectory.shape[0]
+            map_element_pad = max(0, self.max_num_map_elements - map_elements_polylines.shape[0])
+            agents_pad = max(0, self.max_num_agents - motion_tracks.shape[0])
+            ego_plan_pad = max(0, self.planning_horizon - ego_trajectory.shape[0])
             map_label_pad_val = len(self.metadata["LABELS"]["MAP_ELEMENT_LABEL_INDEXES"])
-            map_point_pad_val = map_elements_polylines[-1, -1, -1]
+            map_point_pad_val = -999
             
             map_elements_polylines = F.pad(
-                map_elements_polylines, pad=(0, 0, 0, points_pad, 0, elements_pad), mode="constant", value=map_point_pad_val
+                map_elements_polylines, pad=(0, 0, 0, 0, 0, map_element_pad), mode="constant", value=map_point_pad_val
             )
-            map_elements_labels = F.pad(
-                map_elements_labels, pad=(0, elements_pad), mode="constant", value=map_label_pad_val
+            map_elements_boxes = F.pad(
+                map_elements_boxes, pad=(0, 0, 0, map_element_pad), mode="constant", value=map_label_pad_val
             )
             motion_tracks = F.pad(
                 motion_tracks, pad=(0, 0, 0, 0, 0, agents_pad), mode="constant", value=-999
@@ -195,9 +208,11 @@ class WaymoDataset(Dataset):
             )
         
         det_pad = self.max_num_agents - laser_detections.shape[0]
+        det_label_pad_val = len(self.metadata["LABELS"]["DETECTION_LABEL_INDEXES"])
         laser_detections = F.pad(laser_detections, pad=(0, 0, 0, det_pad), mode="constant", value=-999)
+        laser_detections[:, -1][laser_detections[:, -1] == -999] = det_label_pad_val
 
-        return FrameData(
+        frame_data = FrameData(
             cam_views=cam_views,
             point_cloud=point_cloud,
             ego_pose=ego_pose,
@@ -206,11 +221,11 @@ class WaymoDataset(Dataset):
             cam_extrinsic=cam_extrinsic,
             motion_tracks=motion_tracks,
             occupancy_map=occupancy_map,
-            map_elements_mask=map_elements_mask,
             map_elements_polylines=map_elements_polylines,
-            map_elements_labels=map_elements_labels,
+            map_elements_boxes=map_elements_boxes,
             ego_trajectory=ego_trajectory
         )
+        return frame_data
 
 
     @check_perf
@@ -218,8 +233,16 @@ class WaymoDataset(Dataset):
         num_frames = len(sample_dict)
         max_horizon = max(self.motion_horizon, self.occupancy_horizon)
         
+        current_timestamp = sample_dict[frame_idx]["timestamp_seconds"]
+        next_timestamp = sample_dict[frame_idx + 1]["timestamp_seconds"]
+
+        dt = next_timestamp - current_timestamp
+        iter_start = frame_idx
+        iter_step = max(1, int(1 / (dt * self.motion_sample_freq)))
+        iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
+
         track_maps = {}
-        for idx in range(frame_idx, min(num_frames, frame_idx + max_horizon + 1)):
+        for idx in range(iter_start, iter_end, iter_step):
             laser_labels_path = sample_dict[idx]["laser_labels_path"]
             laser_labels_list = load_pickle_file(laser_labels_path)
 
@@ -288,11 +311,12 @@ class WaymoDataset(Dataset):
             point_cloud = F.interpolate(point_cloud.permute(1, 0)[None], size=self.num_cloud_points, mode="linear")
             point_cloud = point_cloud[0].permute(1, 0)
         # shape: (num_points, 4)
-        return point_cloud[..., [3, 4, 5, 0]]
+        point_cloud = point_cloud[..., [3, 4, 5, 0]]
+        return point_cloud
 
 
     @check_perf
-    def _load_laser_labels(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
+    def _load_laser_labels(self, frame_dict: Dict[str, Any], obj_id_map: Dict[str, int]) -> torch.Tensor:
         laser_labels_path = frame_dict["laser_labels_path"]
         laser_labels_list = load_pickle_file(laser_labels_path)
         obj_3d_dets = []
@@ -304,7 +328,13 @@ class WaymoDataset(Dataset):
                 or (obj_3d_bbox["center_y"] < self.xyz_range[1][0] or obj_3d_bbox["center_y"] > self.xyz_range[1][1])
                 or (obj_3d_bbox["center_z"] < self.xyz_range[2][0] or obj_3d_bbox["center_z"] > self.xyz_range[2][1])
             ): continue
+
+            obj_id = laser_labels_list[obj_idx]["id"]
+            if obj_id not in obj_id_map:
+                obj_id_map[obj_id] = len(obj_id_map)
+
             obj_3d_dets.append([
+                obj_id_map[obj_id],
                 obj_3d_bbox["center_x"],
                 obj_3d_bbox["center_y"],
                 obj_3d_bbox["center_z"],
@@ -315,7 +345,7 @@ class WaymoDataset(Dataset):
                 laser_labels_list[obj_idx]["type"]
             ])
         obj_3d_dets = torch.tensor(obj_3d_dets, dtype=torch.float32)
-        # shape: (num_detections, 8)
+        # shape: (num_detections, 9)
         return obj_3d_dets
 
     
@@ -349,39 +379,60 @@ class WaymoDataset(Dataset):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
         map_element_dict = frame_dict["map_elements"]
-        mask_path = map_element_dict["mask_path"]
         polylines_path = map_element_dict["polylines_path"]
         eos_token = map_element_dict["eos_token"]
         pad_token = map_element_dict["pad_token"]
 
         polylines = np.load(polylines_path)
-        mask = np.load(mask_path)
 
-        labels = polylines[:, 0]
+        cls = polylines[:, 0:1]
         polylines = polylines[:, 1:]
         polylines = polylines.reshape(polylines.shape[0], polylines.shape[1] // 2, 2)
-        eos_mask = polylines == eos_token
-        pad_mask = polylines == pad_token
 
-        scale_numer = np.asarray([self.bev_map_hw[1], self.bev_map_hw[0]]) - 1
-        scale_denom = np.asarray([mask.shape[2], mask.shape[1]]) - 1
-        xy_scale_ratio = scale_numer / scale_denom
+        points_pad_size = max(0, self.max_num_polyline_points - polylines.shape[1])
+        print(polylines.shape)
+        polylines = np.pad(polylines, ((0, 0), (0, points_pad_size), (0, 0)), constant_values=pad_token)
+        print(polylines.shape)
 
-        polylines = np.floor(polylines * xy_scale_ratio).astype(int)
+        eos_mask = (polylines == eos_token)
+        pad_mask = (polylines == pad_token)
+
+        xy_min = np.asarray([self.xyz_range[0][0], self.xyz_range[1][0]])
+        xy_max = np.asarray([self.xyz_range[0][1], self.xyz_range[1][1]])
+        polylines = (polylines - xy_min) / (xy_max - xy_min)
+        polylines *= np.asarray([self.bev_map_hw[1] - 1, self.bev_map_hw[0] - 1])
+        polylines = np.floor(polylines).astype(int)
+
+        eos_token = max(self.bev_map_hw)
+        pad_token = eos_token + 1
+
         polylines[eos_mask] = eos_token
         polylines[pad_mask] = pad_token
+        pad_vals = None
 
-        mask = torch.from_numpy(mask)
+        if not self.pad_polylines_out_of_index:
+            # pad within index, specifically replace EOS and PAD elements with the first valid vertex for each
+            # polyline
+            polylines = np.copy(polylines)
+            invalid_mask = np.isin(polylines, [eos_token, pad_token])
+            b_i, *_ = np.where(invalid_mask)
+            polylines[invalid_mask] = polylines[b_i[0::2], 0, :].reshape(-1)
+
+        else:
+            pad_vals = torch.tensor([eos_token, pad_token])
+
         polylines = torch.from_numpy(polylines)
-        labels = torch.from_numpy(labels)
+        polyline_boxes = polyline_2_xywh(polylines, pad_vals)
+
+        # scale boxes
+        polyline_boxes[..., [0, 2]] /= self.bev_map_hw[1]
+        polyline_boxes[..., [1, 3]] /= self.bev_map_hw[0]
+        cls = torch.from_numpy(cls)
+        boxes = torch.concat([polyline_boxes, cls], dim=-1)
         
-        if mask.shape[1] != self.bev_map_hw[0] or mask.shape[2] != self.bev_map_hw[1]:
-            mask = F.interpolate(mask[None], size=self.bev_map_hw, mode="bilinear")[0]
-        
-        # mask shape: (1, H_bev, W_bev)
         # polylines: (num_elements, num_points, 2)
-        # labels: (num_elements, )
-        return mask, polylines, labels
+        # boxes: (num_elements, 4 + 1)
+        return polylines, boxes
     
 
     @check_perf
@@ -391,18 +442,25 @@ class WaymoDataset(Dataset):
         frame_idx: int,
         ego_pose: torch.Tensor
     ) -> torch.Tensor:
-        num_samples = len(sample_dict)
-        if frame_idx + 1 == num_samples:
+        num_frames = len(sample_dict)
+
+        if frame_idx + 1 == num_frames:
             return torch.tensor([], dtype=torch.float32)
-        global_positions = [
-            sample_dict[idx]["ego_pose"][:, -1] 
-            for idx in range(frame_idx + 1, min(num_samples, frame_idx + self.planning_horizon + 1))
-        ]
+            
+        current_timestamp = sample_dict[frame_idx]["timestamp_seconds"]
+        next_timestamp = sample_dict[frame_idx + 1]["timestamp_seconds"]
+
+        dt = next_timestamp - current_timestamp
+        iter_start = frame_idx + 1
+        iter_step = max(1, int(1 / (dt * self.motion_sample_freq)))
+        iter_end = min(num_frames, frame_idx + (iter_step * self.planning_horizon) + 1)
+
+        global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)
         global_positions = torch.from_numpy(global_positions)
         ego_positions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
         # shape: (timesteps, 2)
-        return ego_positions[:, :2]
+        return ego_positions[:, :2].to(dtype=torch.float32)
         
     
     @check_perf

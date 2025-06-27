@@ -27,9 +27,9 @@ class FrameData(DeviceChangeMixin):
         for reflectance r.
 
     laser_detections: This tensor contains objects / agents detected with the LIDAR sensors as 3D bounding boxes mapped
-        to the ego vehicle frame. The tensor is of shape [Nd_lidar, 8], where Nd_lidar is the number of unique objects 
+        to the ego vehicle frame. The tensor is of shape [Nd_lidar, 9], where Nd_lidar is the number of unique objects
         detected across the LIDAR sensors, and each index of the second dimension corresponds to:
-        [center_x, center_y, center_z, length, width, height, heading_angle(rad), object_type]
+        [track_id, center_x, center_y, center_z, length, width, height, heading_angle(rad), object_type]
 
     ego_pose: A [4, 4] transformation matrix to rotate relative coordinates of global frame to ego vehicle frame
 
@@ -49,13 +49,11 @@ class FrameData(DeviceChangeMixin):
         The tensor is of shape [N_agents, occ_timesteps, H_bev, W_bev], where H_bev and W_bev are the height and width 
         of the BEV grid. This map contains the occupancy of the current timestep as the first map
 
-    map_elements_mask: This tensor contains mask segmentation of road components on the BEV grid. This tensor is of shape 
-        [1, H_bev, W_bev].
-
     map_elements_polylines: This tensor contains the quantized vertices of polylines on the BEV grid. This tensor is of shape
         [num_elements, num_vertices, 2]
 
-    map_elements_labels: This tensor contains the class label indexes of map elements, This tensor is of shape [num_elements, ]
+    map_elements_boxes: This tensor contains the bounding coord data and class label indexes of map elements, This tensor is 
+        of shape [num_elements, 5] (4 for box data (x, y, w, h) and 1 for class label)
 
     ego_trajectory: This tensor contains movement trajectory (waypoints) of ego vehicle in ego vehicle coordinates, The tensor 
         is of shape [plan_timesteps, 2]. It only has two dimensions because it the trajectory corresponds to movement along the
@@ -69,9 +67,8 @@ class FrameData(DeviceChangeMixin):
     cam_extrinsic: Optional[torch.Tensor] = None
     motion_tracks: Optional[torch.Tensor] = None
     occupancy_map: Optional[torch.Tensor] = None
-    map_elements_mask: Optional[torch.Tensor] = None
     map_elements_polylines: Optional[torch.Tensor] = None
-    map_elements_labels: Optional[torch.Tensor] = None
+    map_elements_boxes: Optional[torch.Tensor] = None
     ego_trajectory: Optional[torch.Tensor] = None
 
 
@@ -92,9 +89,8 @@ class MultiFrameData(FrameData):
             cam_extrinsic = frames[-1].cam_extrinsic,
             motion_tracks = frames[-1].motion_tracks,
             occupancy_map = frames[-1].occupancy_map,
-            map_elements_mask = frames[-1].map_elements_mask,
             map_elements_polylines = frames[-1].map_elements_polylines,
-            map_elements_labels = frames[-1].map_elements_labels,
+            map_elements_boxes = frames[-1].map_elements_boxes,
             ego_trajectory = frames[-1].ego_trajectory
         )
 
@@ -141,9 +137,8 @@ class BatchMultiFrameData(FrameData):
             cam_extrinsic = [],
             motion_tracks = [],
             occupancy_map = [],
-            map_elements_mask = [],
             map_elements_polylines = [],
-            map_elements_labels = [],
+            map_elements_boxes = [],
             ego_trajectory = []
         )
         

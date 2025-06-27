@@ -11,11 +11,10 @@ from tqdm import tqdm
 from pathlib import Path
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from waymo_open_dataset import dataset_pb2
+from waymo_open_dataset import dataset_pb2, label_pb2
 from waymo_open_dataset.protos import map_pb2
 from waymo_open_dataset.utils.frame_utils import convert_range_image_to_point_cloud
 from utils.io_utils import delete_path, save_pickle_file, save_json_file
-from utils.img_utils import overlap_masks
 from typing import Dict, Any, Callable, Optional, Tuple, Iterable
 
 
@@ -43,6 +42,10 @@ MAP_ELEMENT_LABEL_INDEXES = {
     "crosswalk": 4, 
     "speed_bump": 5, 
     "driveway": 6
+}
+
+DETECTION_LABEL_INDEXES = {
+    k.replace("TYPE_", ""):v for k, v in label_pb2.Label.Type.items()
 }
 
 ROAD_LINE_TYPES = {
@@ -97,7 +100,6 @@ CAMERA_LABELS_LOCAL_PATH = os.path.join(DATA_PATH, "camera/labels")
 POINT_CLOUD_LOCAL_PATH   = os.path.join(DATA_PATH, "lidar/point_clouds")
 CAMERA_PROJ_LOCAL_PATH   = os.path.join(DATA_PATH, "lidar/camera_projections")
 LASER_LABELS_LOCAL_PATH  = os.path.join(DATA_PATH, "lidar/labels")
-MAP_MASKS_LOCAL_PATH     = os.path.join(DATA_PATH, "map_features/masks")
 MAP_POLYLINES_LOCAL_PATH = os.path.join(DATA_PATH, "map_features/polylines")
 
 
@@ -110,66 +112,35 @@ os.makedirs(CAMERA_LABELS_LOCAL_PATH, exist_ok=True)
 os.makedirs(POINT_CLOUD_LOCAL_PATH, exist_ok=True)
 os.makedirs(CAMERA_PROJ_LOCAL_PATH, exist_ok=True)
 os.makedirs(LASER_LABELS_LOCAL_PATH, exist_ok=True)
-os.makedirs(MAP_MASKS_LOCAL_PATH, exist_ok=True)
 os.makedirs(MAP_POLYLINES_LOCAL_PATH, exist_ok=True)
 
 
-def download_gcfile_to_temp(gcf_path: str):
+def download_gcfile_to_temp(gcf_path: str) -> str:
     filename = Path(gcf_path).name
     Gfs.download(gcf_path, TEMP_DATA_PATH)
     temp_path = os.path.join(TEMP_DATA_PATH, filename)
     return temp_path
-        
-
-def draw_stop_sign_on_map(
-        map_img_hw: Tuple[int, int], 
-        position: map_pb2.MapPoint,
-        transform: np.ndarray,
-        xy_min: np.ndarray,
-        xy_max: np.ndarray,
-        sign_radius: int=5,
-    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-
-    map_img = np.zeros(map_img_hw, dtype=np.uint8)
-    point = np.asarray([position.x, position.y, position.z, 1])
-    point = (point[None] @ transform.T)[:, :2]
-    point = (point - xy_min) / (xy_max - xy_min)
-    if point[:, 0] < 0 or point[:, 0] > 1 or point[:, 1] < 0 or point[:, 1] > 1:
-        return
-    point[:, 0] *= (map_img.shape[1] - 1)
-    point[:, 1] *= (map_img.shape[0] - 1)
-    point = point.astype(int)
-    cv2.circle(map_img, center=point[0].tolist(), radius=sign_radius, color=1, thickness=-1)
-    return map_img, point[:, :2]
 
 
-def draw_polyline_on_map(
-        map_img_hw: Tuple[int, int], 
+def transform_map_points(
         polylines: Iterable[map_pb2.MapPoint], 
         transform: np.ndarray,
         xy_min: np.ndarray,
         xy_max: np.ndarray,
-        fill: bool=True,
-        is_closed: bool=True,
-        line_thickness: int=1
-    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    ) -> np.ndarray:
 
-    map_img = np.zeros(map_img_hw, dtype=np.uint8)
     points = np.asarray([[p.x, p.y, p.z, 1] for p in polylines])
     points = (points @ transform.T)[:, :2]
-    points = (points - xy_min) / (xy_max - xy_min)
-    mask = (((points[:, 0] >= 0) & (points[:, 0] <= 1)) & (points[:, 1] >= 0) & (points[:, 1] <= 1))
+    mask = (
+        (points[:, 0] >= xy_min[0]) & 
+        (points[:, 0] <= xy_max[0]) & 
+        (points[:, 1] >= xy_min[1]) & 
+        (points[:, 1] <= xy_max[1])
+    )
     if not np.any(mask):
         return
     points = points[mask]
-    points[:, 0] *= (map_img.shape[1] - 1)
-    points[:, 1] *= (map_img.shape[0] - 1)
-    points = points.astype(int)
-    if fill:
-        cv2.fillPoly(map_img, pts=[points], color=1)
-    else:
-        cv2.polylines(map_img, pts=[points], isClosed=is_closed, thickness=line_thickness, color=1)
-    return map_img, points[:, :2]
+    return points[:, :2]
 
 
 def construct_frame_map_elements(
@@ -177,71 +148,50 @@ def construct_frame_map_elements(
         pose: dataset_pb2.Transform, 
         xy_min: np.ndarray,
         xy_max: np.ndarray,
-        map_img_hw: Tuple[int, int],
         eos_token: int,
         pad_token: int, 
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
     
     transform = np.linalg.inv(np.reshape(pose.transform, (4, 4)))
-    line_thickness = 1
-    masks = []
     polylines = []
     labels = []
 
     for feature in map_features:
         if feature.HasField("lane"):
-            output = draw_polyline_on_map(
-                map_img_hw, feature.lane.polyline, transform, xy_min, xy_max, False, False, line_thickness
-            )
+            polyline = transform_map_points(feature.lane.polyline, transform, xy_min, xy_max)
             label = "lane"
 
         elif feature.HasField("road_line"):
-            output = draw_polyline_on_map(
-                map_img_hw, feature.road_line.polyline, transform, xy_min, xy_max, False, False, line_thickness
-            )
+            polyline = transform_map_points(feature.road_line.polyline, transform, xy_min, xy_max)
             label = "road_line"
 
         elif feature.HasField("road_edge"):
-            output = draw_polyline_on_map(
-                map_img_hw, feature.road_edge.polyline, transform, xy_min, xy_max, False, False, line_thickness
-            )
+            polyline = transform_map_points(feature.road_edge.polyline, transform, xy_min, xy_max)
             label = "road_edge"
 
         elif feature.HasField("stop_sign"):
-            output = draw_stop_sign_on_map(
-                map_img_hw, feature.stop_sign.position, transform, xy_min, xy_max, sign_radius=5
-            )
+            polyline = transform_map_points([feature.stop_sign.position], transform, xy_min, xy_max)
             label = "stop_sign"
 
         elif feature.HasField("crosswalk"):
-            output = draw_polyline_on_map(
-                map_img_hw, feature.crosswalk.polygon, transform, xy_min, xy_max, True, line_thickness
-            )
+            polyline = transform_map_points(feature.crosswalk.polygon, transform, xy_min, xy_max)
             label = "crosswalk"
 
         elif feature.HasField("speed_bump"):
-            output = draw_polyline_on_map(
-                map_img_hw, feature.speed_bump.polygon, transform, xy_min, xy_max, True, line_thickness
-            )
+            polyline = transform_map_points(feature.speed_bump.polygon, transform, xy_min, xy_max)
             label = "speed_bump"
         
         elif feature.HasField("driveway"):
-            output = draw_polyline_on_map(
-                map_img_hw, feature.driveway.polygon, transform, xy_min, xy_max, True, line_thickness
-            )
+            polyline = transform_map_points(feature.driveway.polygon, transform, xy_min, xy_max)
             label = "driveway"
 
         else:
             continue
 
-        if output is not None:
-            masks.append(output[0])
-            polylines.append(output[1])
+        if polyline is not None:
+            polylines.append(polyline)
             labels.append(MAP_ELEMENT_LABEL_INDEXES[label])
     
-    masks = np.stack(masks, axis=0)
-    masks, sorted_indexes = overlap_masks(masks)
-
     max_vertices = max([p.shape[0] for p in polylines]) + 1
     
     # Let us use eos_token and pad_token to represent end of sequence and padding respectively 
@@ -256,11 +206,10 @@ def construct_frame_map_elements(
     polylines = np.stack(polylines, axis=0)
     labels = np.asarray(labels)
 
-    # polyline shape: [label, x_0, y_0, x_1, y_1, x_2, y_2, ..., -1, -2, -2, -2, -2, -2]
+    # polyline shape: [label, x_0, y_0, x_1, y_1, x_2, y_2, ..., <eos>, <y_pad>, <x_pad>, <y_pad>]
     polylines = polylines.reshape(polylines.shape[0], -1)
     polylines = np.concatenate([labels[:, None], polylines], axis=1)
-    polylines = polylines[sorted_indexes]
-    return masks, polylines
+    return polylines
 
 
 def interpolate_points(points: np.ndarray, num_points: int) -> np.ndarray:
@@ -393,7 +342,6 @@ def process_perception_frame(
 
     xy_min = np.asarray([other_kwargs["xy_range"][0][0], other_kwargs["xy_range"][1][0]])
     xy_max = np.asarray([other_kwargs["xy_range"][0][1], other_kwargs["xy_range"][1][1]])
-    map_img_hw = other_kwargs["map_img_hw"]
 
     # camera views
     camera_views = np.stack(camera_views, axis=0)
@@ -407,20 +355,16 @@ def process_perception_frame(
     eos_token = other_kwargs["map_elements_eos_token"]
     pad_token = other_kwargs["map_elements_pad_token"]
     other_kwargs = other_kwargs or {}
-    map_mask, polylines = construct_frame_map_elements(
+    map_polylines = construct_frame_map_elements(
         map_features, 
         frame.pose, 
         xy_min=xy_min, 
         xy_max=xy_max, 
-        map_img_hw=map_img_hw,
         eos_token=eos_token,
         pad_token=pad_token,
     )
-    map_mask_path = os.path.join(MAP_MASKS_LOCAL_PATH, f"{sample_name}_frame_{frame_idx}.npy")
-    np.save(map_mask_path, map_mask)
-
     map_polylines_path = os.path.join(MAP_POLYLINES_LOCAL_PATH, f"{sample_name}_frame_{frame_idx}.npy")
-    np.save(map_polylines_path, polylines)
+    np.save(map_polylines_path, map_polylines)
         
     # generate LIDAR point cloud data for each LIDAR views
     points, cp_points = convert_range_image_to_point_cloud(
@@ -464,7 +408,6 @@ def process_perception_frame(
         "camera_proj_matrix": camera_proj_matrix,
         "laser_proj_matrix": laser_proj_matrix,
         "map_elements": {
-            "mask_path": map_mask_path,
             "polylines_path": map_polylines_path,
             "eos_token": eos_token,
             "pad_token": pad_token
@@ -545,6 +488,7 @@ async def run(other_kwargs: Optional[Dict[str, Any]]=None):
             "CAM_NAME_INDEX_LABELS": CAM_NAME_INDEX_LABELS,
             "LASER_NAME_INDEX_LABELS": LASER_NAME_INDEX_LABELS,
             "MAP_ELEMENT_LABEL_INDEXES": MAP_ELEMENT_LABEL_INDEXES,
+            "DETECTION_LABEL_INDEXES": DETECTION_LABEL_INDEXES
         },
         "MAP_ELEMENTS":{
             "ROAD_LINE_TYPES": ROAD_LINE_TYPES,
@@ -561,7 +505,6 @@ async def run(other_kwargs: Optional[Dict[str, Any]]=None):
             "POINT_CLOUD_PATH": POINT_CLOUD_LOCAL_PATH,
             "CAMERA_PROJ_PATH": CAMERA_PROJ_LOCAL_PATH,
             "LASER_LABELS_PATH": LASER_LABELS_LOCAL_PATH,
-            "MAP_MASKS_PATH": MAP_MASKS_LOCAL_PATH,
             "MAP_POLYLINES_PATH": MAP_POLYLINES_LOCAL_PATH
         }
     }
@@ -614,12 +557,6 @@ if __name__ == "__main__":
         "--cam_img_height", type=int, default=480, metavar="", help="Camera image height"
     )
     parser.add_argument(
-        "--map_img_width", type=int, default=512, metavar="", help="Map image width"
-    )
-    parser.add_argument(
-        "--map_img_height", type=int, default=512, metavar="", help="Map image height"
-    )
-    parser.add_argument(
         "--num_laser_points", type=int, default=100_000, metavar="", help="Number of points in point cloud"
     )
     parser.add_argument(
@@ -639,11 +576,11 @@ if __name__ == "__main__":
         help="maximum value captured by map image along the y-axis"
     )
     parser.add_argument(
-        "--map_elements_eos_token", type=int, default=-1, metavar="", 
+        "--map_elements_eos_token", type=int, default=-998, metavar="", 
         help="eos token for map element polyline vertices"
     )
     parser.add_argument(
-        "--map_elements_pad_token", type=int, default=-2, metavar="", 
+        "--map_elements_pad_token", type=int, default=-999, metavar="", 
         help="pad token for map element polyline vertices"
     )
 
@@ -663,7 +600,6 @@ if __name__ == "__main__":
 
     other_kwargs = {
         "cam_img_hw": (args.cam_img_height, args.cam_img_width),
-        "map_img_hw": (args.map_img_height, args.map_img_width),
         "xy_range": ((args.map_min_x, args.map_max_x), (args.map_min_y, args.map_max_y)),
         "num_laser_points": args.num_laser_points,
         "map_elements_eos_token": args.map_elements_eos_token,

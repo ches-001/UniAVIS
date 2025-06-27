@@ -87,9 +87,9 @@ class PlanFormerDecoderLayer(nn.Module):
 class PlanFormer(BaseFormer):
     def __init__(
             self,
-            num_heads: int, 
-            embed_dim: int,
             num_commands: int,
+            num_heads: int=8, 
+            embed_dim: int=256,
             num_layers: int=3,
             num_modes: int=6,
             num_ref_points: int=4,
@@ -102,9 +102,9 @@ class PlanFormer(BaseFormer):
         ):
         super(PlanFormer, self).__init__()
 
+        self.num_commands         = num_commands
         self.num_heads            = num_heads
         self.embed_dim            = embed_dim
-        self.num_commands         = num_commands
         self.num_layers           = num_layers
         self.num_modes            = num_modes
         self.num_ref_points       = num_ref_points
@@ -191,6 +191,12 @@ class PlanFormer(BaseFormer):
                 bev_features=bev_features, 
                 ref_points=ref_points
             )
-        trajectories = self.trajectory_mlp(plan_queries).reshape(batch_size, self.pred_horizon, 2).cumsum(dim=1)
+        
+        # Ego trajectory is in ego vehicle frame, hence the current position is always (0, 0).
+        # the trajectory_mlp predicts (v x dt = dx) at each timestep and the cummulative sum 
+        # gives us the position at each timestep. Converting to global frame is as simple as
+        # transforming the predicted trajectories with information from the ego pose data.
+        trajectories = self.trajectory_mlp(plan_queries).reshape(batch_size, self.pred_horizon, 2)
+        trajectories = torch.cumsum(trajectories, dim=1)
         
         return plan_queries[:, 0, :], trajectories

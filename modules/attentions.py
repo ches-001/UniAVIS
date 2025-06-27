@@ -24,6 +24,7 @@ class DotProductAttention(nn.Module):
             V: torch.Tensor,
             padding_mask: Optional[torch.Tensor]=None,
             attention_mask: Optional[torch.Tensor]=None,
+            is_query_mask: bool=True
         ) -> torch.Tensor:
         """
         Input
@@ -34,9 +35,15 @@ class DotProductAttention(nn.Module):
 
         :V: (N, ..., value_len, embed_dim), attention values
 
-        :padding_mask: (N, ..., query_len), padding mask (0 if padding, else 1)
+        :padding_mask: (N, ..., query_len) or (N, ..., key_len), padding mask (0 if padding, else 1).
+            see the is_query_mask argument
 
-        :attention_mask: (N, ..., query_len, key_len), attention mask (0 if not attended to, else 1)
+        :attention_mask: (N, ..., query_len, key_len), attention mask 
+            for boolean masks, (0 if not to attend to, else 1) if mask is float type with continuous values
+            it is directly multiplied with the attention weights
+
+        :is_query_mask: bool, if True, the padding mask will correspond to the queries, else it will correspond
+            to the keys
 
         Returns
         --------------------------------
@@ -49,13 +56,21 @@ class DotProductAttention(nn.Module):
         attn   = torch.matmul(Q, K_T) / math.sqrt(K.shape[-1])
 
         if torch.is_tensor(padding_mask):
-            if (attn.ndim - padding_mask.ndim) == 1:
-                padding_mask = padding_mask[..., None]
+            assert padding_mask.dtype == torch.bool
+
+            if is_query_mask:
+                if (attn.ndim - padding_mask.ndim) == 1:
+                    padding_mask = padding_mask[..., None]
+            else:
+                if (attn.ndim - padding_mask.ndim) == 1:
+                    padding_mask = padding_mask[..., None, :]
+
             assert attn.ndim == padding_mask.ndim
             attn = attn.masked_fill(~padding_mask, -torch.inf)
             
         if torch.is_tensor(attention_mask):
             assert attn.ndim == attention_mask.ndim
+
             if attention_mask.dtype == torch.bool:
                 attn = attn.masked_fill(~attention_mask, -torch.inf)
             else:
@@ -93,6 +108,7 @@ class MultiHeadedAttention(nn.Module):
                 V: torch.Tensor,
                 padding_mask: Optional[torch.Tensor]=None,
                 attention_mask: Optional[torch.Tensor]=None,
+                is_query_mask: bool=True
         ) -> torch.Tensor:
 
         """
@@ -104,10 +120,14 @@ class MultiHeadedAttention(nn.Module):
 
         :V: (N, ..., value_len, embed_dim), attention values
 
-        :padding_mask: (N, ..., query_len) | (N, ..., query_len, 1), padding mask (0 if padding, else 1)
+        :padding_mask: (N, ..., query_len) | (N, ..., query_len, 1) or (N, ..., key_len) | (N, ..., key_len, 1), 
+            padding mask (0 if padding, else 1). See is_query_mask
 
-        :attention_mask: (N, ..., query_len, key_len), attention mask (0 if not attended to, else 1)
+        :attention_mask: (N, ..., query_len, key_len), For boolean masks, (0 if not to attend to, else 1) 
+            if mask is float type with continuous values it is directly multiplied with the attention weights
 
+        :is_query_mask: bool, if True, the padding mask will correspond to the queries, else it will correspond
+            to the keys
         Returns
         --------------------------------
         :output: (N, query_len, embed_dim)
@@ -136,7 +156,7 @@ class MultiHeadedAttention(nn.Module):
         if attention_mask is not None:
             attention_mask = attention_mask[(slice(None), ) * (ndim - 2) + (None, )]
 
-        output = self.attention(Q, K, V, padding_mask, attention_mask)
+        output = self.attention(Q, K, V, padding_mask, attention_mask, is_query_mask=is_query_mask)
         output = output.permute(*unperm_axes, -2, -3, -1)
         output = output.reshape(*orig_shape)
         
@@ -213,7 +233,8 @@ class DeformableAttention(nn.Module):
 
         :value_spatial_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
-        :attention_mask: (N, query_len, L), attention mask (0 if to ignore, else 1)
+        :attention_mask: (N, query_len, L) For boolean masks, (0 if not to attend to, else 1) if mask is float type 
+            with continuous values it is directly multiplied with the attention weights
 
         :normalize_ref_points: bool, normalize reference points to fall within range [-1, 1], if set to False, ensure that
                                reference points are already normalized
@@ -237,7 +258,6 @@ class DeformableAttention(nn.Module):
             offsets = self.offsets_fc(torch.concat([queries, value], dim=-1))
             
         value = self.V_fc(value).reshape(batch_size, value_len, self.num_heads, -1)
-
 
         offsets = offsets.reshape(batch_size, query_len, self.num_heads, self.num_fmap_levels, self.num_ref_points, 2)
         offsets = self.offset_scale * offsets
@@ -402,7 +422,8 @@ class MultiViewDeformableAttention(DeformableAttention):
 
         :value_spatial_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
-        :attention_mask: (N, query_len, num_views, L, z_refs), attention mask (0 if to ignore, else 1)
+        :attention_mask: For boolean masks, (0 if not to attend to, else 1) if mask is float type 
+            with continuous values it is directly multiplied with the attention weights
 
         :normalize_ref_points: bool, normalize reference points to fall within range [-1, 1], if set to False, ensure that
                                reference points are already normalized

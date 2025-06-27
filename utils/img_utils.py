@@ -1,7 +1,20 @@
 import cv2
 import torch
 import numpy as np
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
+
+
+def _safe_nanmin(data: torch.Tensor, dim: int) -> torch.Tensor:
+    data = data.clone()
+    data[torch.isnan(data)] = torch.inf
+    return data.min(dim).values
+
+
+def _safe_nanmax(data: torch.Tensor, dim: int) -> torch.Tensor:
+    data = data.clone()
+    data[torch.isnan(data)] = -torch.inf
+    return data.max(dim).values
+
 
 def point_clouds_to_binary_bev_maps(
         point_clouds: torch.Tensor, 
@@ -159,53 +172,163 @@ def generate_occupancy_map(
         ).cpu()
         occ_maps *= binary_occ_maps[None]
     return occ_maps
-    
 
-def polylines_to_xywh(polylines: List[np.ndarray]) -> List[np.ndarray]:
-    bboxes = []
-    for polyline in polylines:
-        assert polyline.ndim == 2
-        x1, y1, x2, y2 = polyline[:, 0].min(), polyline[:, 1].min(), polyline[:, 0].max(), polyline[:, 1].max()
-        w, h = x2 - x1, y2 - y1
-        x, y = x1 + (w/2), y1 + (h/2)
-        bboxes.append(np.asarray([x, y, w, h]))
+
+def xywh_to_xyxy(bboxes: torch.Tensor) -> torch.Tensor:
+    """convert xywh -> xyxy"""
+    x1y1 = bboxes[..., :2] - (bboxes[..., 2:] / 2)
+    x2y2 = x1y1 + bboxes[..., 2:]
+    bboxes = torch.concat([x1y1, x2y2], dim=-1)
     return bboxes
 
 
-def polylines_to_masks(
-        polylines: List[np.ndarray],
-        img_hw: Tuple[int, int],
-        scale_factor: float=1.0,
-        fill_mask: Optional[List[bool]]=None
-    ) -> np.ndarray:
-    masks = []
-    for i, polyline in enumerate(polylines):
-        assert polyline.ndim == 2
-        mask = np.zeros((round(img_hw[0] * scale_factor), round(img_hw[1] * scale_factor)), dtype=np.uint8)
-        if fill_mask is not None:
-            if not fill_mask[i]:
-                cv2.polylines(mask, pts=polyline[None], isClosed=False, color=1)
-            else:
-                cv2.fillPoly(mask, pts=polyline[None], color=1)
-        else:
-            cv2.polylines(mask, pts=polyline[None], isClosed=False, color=1)
-        masks.append(mask)
-    masks = np.stack(masks, axis=0)
-    return masks
+def xyxy_to_xywh(bboxes: torch.Tensor) -> torch.Tensor:
+    """convert xyxy -> xywh"""
+    wh = bboxes[..., 2:] - bboxes[..., :2]
+    xy = bboxes[..., :2] + (wh / 2)
+    bboxes = torch.concat([xy, wh], axis=-1)
+    return bboxes
 
 
-def overlap_masks(masks: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def polyline_2_xywh(
+        polygons: torch.Tensor, 
+        pad_mask_vals: Optional[torch.Tensor]=None
+    ) -> torch.Tensor:
+
+    if pad_mask_vals is not None:
+        assert pad_mask_vals.ndim == 1
+
+    assert polygons.ndim == 3
+
+    if pad_mask_vals is not None:
+        polygons = polygons.clone().float()
+        polygons[torch.isin(polygons, pad_mask_vals)] = torch.nan
+        x1, y1, x2, y2 = (
+            _safe_nanmin(polygons[..., 0], dim=1), 
+            _safe_nanmin(polygons[..., 1], dim=1),
+            _safe_nanmax(polygons[..., 0], dim=1),
+            _safe_nanmax(polygons[..., 1], dim=1)
+        )
+    else:
+        x1, y1, x2, y2 = (
+            polygons[..., 0].min(dim=1).values,
+            polygons[..., 1].min(dim=1).values,
+            polygons[..., 0].max(dim=1).values,
+            polygons[..., 1].max(dim=1).values
+        )
+    w, h = x2 - x1, y2 - y1
+    x, y = x1 + (w/2), y1 + (h/2)
+    bboxes = torch.stack([x, y, w, h], dim=-1)
+    return bboxes
+
+
+def rotate_points(points: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
+    """
+    Rotate a 2D point or rotate a 3D point about the z-axis.
+
+    points: (N, num_objects, 2 | 3)  expects either 2D or 3D points
+    angle: (N, num_objects | 1) heading / rotation angle in radiance
+    """
+    assert points.shape[-1] == 2 or points.shape[-1] == 3
+    
+    angle_cos = torch.cos(angle)
+    angle_sin = torch.sin(angle)
+
+    if points.shape[-1] == 2:
+        rotation_matrix = torch.stack([angle_cos, angle_sin, -angle_sin, angle_cos], dim=-1)
+        rotation_matrix = torch.unflatten(rotation_matrix, dim=-1, sizes=(2, 2))
+    
+    else:
+        zeros = torch.zeros_like(angle_cos)
+        ones = torch.ones_like(angle_cos)
+        rotation_matrix = torch.stack([angle_cos, angle_sin, zeros, -angle_sin, angle_cos, zeros, zeros, zeros, ones], dim=-1)
+        rotation_matrix = torch.unflatten(rotation_matrix, dim=-1, sizes=(3, 3))
+
+    return torch.matmul(points[..., None, :], rotation_matrix.permute(0, 1, 3, 2))[..., 0, :]
+
+
+def translate_points(points: torch.Tensor, ref_point: torch.Tensor) -> torch.Tensor:
+    """
+    Translate a point to the frame of a reference point.
+    
+    points: (N, num_objects, 2 | 3)  expects either 2D or 3D points
+    ref_point: (N, 1, 2 | 3)  expects either 2D or 3D points
+    """
+    assert points.shape[-1] == ref_point.shape[-1]
+    if ref_point.ndim == 2:
+        ref_point = ref_point[:, None, :]
+    return points - ref_point
+
+
+def transform_points(
+        points: torch.Tensor, 
+        *, 
+        ref_points: Optional[torch.Tensor]=None, 
+        angles: Optional[torch.Tensor]=None,
+        transform_matrix: Optional[torch.Tensor]=None
+    ) -> torch.Tensor:
+    """
+    Apply rotation and then translation.
+
+    points: (N, 1 | num_objects, 2 | 3)  expects either 2D or 3D points
+    angle: (N, num_objects | 1) heading / rotation angle in radiance
+    ref_point: (N, 1 | num_objects, 2 | 3)  expects either 2D or 3D points
+    transform_matrix: (N, 1 | num_objects, 2, 2) | (N, 1 | num_objects, 3, 3)
+    """
+    if ref_points is not None and angles is not None:
+        return translate_points(rotate_points(points, angles), ref_points)
+    
+    elif transform_matrix is not None:
+        return torch.matmul(points[..., None, :], transform_matrix.permute(0, 1, 3, 2))[..., 0, :]
+
+    else:
+        raise ValueError(
+            "expects angle and ref_points for rotation and translation respectively, or transform_matrix for transformation"
+        )
+    
+
+def overlap_img_masks(masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     assert masks.ndim == 3
     areas = masks.sum((1, 2))
-    sorted_indices = np.argsort(-areas)
-    final_mask = np.zeros(masks.shape[1:], dtype=(np.uint8 if masks.shape[0] <= 255 else np.uint32))
-    for i, sorted_idx in enumerate(sorted_indices):
-        final_mask += (masks[sorted_idx] * (i + 1)).astype(final_mask.dtype)
-        final_mask = np.clip(final_mask, a_min=0, a_max=i+1)
-    final_mask = final_mask
-    return final_mask[None], sorted_indices
+    sorted_indexes = torch.argsort(-areas)
+
+    final_mask = masks[sorted_indexes]
+    labels = torch.arange(1, sorted_indexes.shape[0] + 1, step=1, device=masks.device)[:, None, None]
+    final_mask = masks * labels
+    final_mask = final_mask.max(dim=0).values[None]
+    return final_mask, sorted_indexes
 
 
-def polygons_to_overlapped_mask(*args, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-    masks = polylines_to_masks(*args, **kwargs)
-    return overlap_masks(masks)
+def polylines_to_img_mask(
+        polylines: torch.Tensor, 
+        img_hw: Tuple[int, int], 
+        pad_vals: Optional[torch.Tensor]=None,
+        overlap: bool=True
+    ) -> Union[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    polylines: (N, num_vertices, 2) (dtype must be int64), The last axis corresponds to x, y
+
+    img_hw: [H, W] of generated mask image
+
+    pad_vals: values used to pad the polylines (including EOS and PAD tokens)
+
+    overlap: whether to overlap generated masks of each element (creating a (1, H, W) tensor) 
+        or not (N,c H, W) tensor
+    """
+    assert polylines.dtype == torch.int64 and polylines.ndim == 3 and polylines.shape[2] == 2
+
+    if pad_vals is not None:
+        polylines = polylines.clone()
+        invalid_mask = torch.isin(polylines, pad_vals)
+        b_i, *_ = torch.where(invalid_mask)
+        polylines[invalid_mask] = polylines[b_i[0::2], 0, :].flatten(start_dim=0, end_dim=1)
+        
+    device = polylines.device
+    batch_indexes = torch.arange(polylines.shape[0], device=device)[:, None].tile(1, polylines.shape[1])
+    img_masks = torch.zeros(polylines.shape[0], *img_hw, device=device, dtype=torch.bool)
+    img_masks[batch_indexes, polylines[:, :, 1], polylines[:, :, 0]] = 1
+
+    sorted_indexes = None
+    if overlap:
+        img_masks, sorted_indexes = overlap_img_masks(img_masks)
+    return img_masks, sorted_indexes

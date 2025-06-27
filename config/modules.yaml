@@ -1,0 +1,132 @@
+embed_dim: &embed_dim 256
+grid_xy_res: &grid_xy_res [0.512, 0.512]
+bev_feature_hw: &bev_feature_hw [200, 200]
+x_range: &x_range [-51.2, 51.2]
+y_range: &y_range [-51.2, 51.2]
+z_ref_range: &z_ref_range [-5.0, 3.0]
+num_motion_modes: &num_motion_modes 6
+max_num_agents: &max_num_agents 500
+max_num_map_elements: &max_num_map_elements 500
+
+cam_img_hw: [480, 640]
+num_cloud_points: 100000
+frames_per_sample: 4
+sample_horizon_secs: 2.0
+max_num_polyline_points: 1000
+
+bevformer:
+  in_img_channels: 3
+  bb_block: "BasicBlock"
+  bb_block_layers: [3, 4, 6, 3]
+  num_layers: 6
+  num_heads: 8
+  embed_dim: *embed_dim
+  num_ref_points: 4
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  num_z_ref_points: 4
+  num_views: 6
+  num_fmap_levels: 4
+  grid_xy_res: *grid_xy_res
+  bev_query_hw: *bev_feature_hw
+  z_ref_range: *z_ref_range
+  learnable_pe: False
+
+pillarfeaturenet:
+  out_dim: *embed_dim
+  pillar_wh: [0.16, 0.16]
+  max_points: 100
+  max_pillars: 12000
+  out_grid_hw: *bev_feature_hw
+  xyz_range: [*x_range, *y_range, *z_ref_range]
+
+trackformer:
+  num_heads: 8
+  embed_dim: *embed_dim
+  num_layers: 6
+  num_classes: 6
+  num_ref_points: 4
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  max_detections: *max_num_agents
+  learnable_pe: True
+  bev_feature_hw: *bev_feature_hw
+  det_3d: True
+
+vectormapformer:
+  num_heads: 8
+  embed_dim: *embed_dim
+  num_layers: 6
+  num_classes: 8
+  num_ref_points: 4
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  max_elements: *max_num_map_elements
+  max_vertices: 1000
+  learnable_pe: True
+  bev_feature_hw: *bev_feature_hw
+
+rastermapformer:
+  num_heads: 8
+  embed_dim: *embed_dim
+  num_layers: 6
+  num_classes: 6
+  num_ref_points: 4
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  max_detections: *max_num_map_elements
+  learnable_pe: True
+  bev_feature_hw: *bev_feature_hw
+  det_3d: True
+  num_seg_coeffs: 32
+  seg_c_h: 256
+
+motionformer:
+  num_heads: 8
+  embed_dim: *embed_dim
+  max_num_agents: *max_num_agents
+  max_num_map_elements: *max_num_map_elements
+  num_layers: 3
+  num_modes: *num_motion_modes
+  num_ref_points: 4
+  pred_horizon: 12
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  learnable_pe: True
+  bev_feature_hw: *bev_feature_hw
+  grid_xy_res: *grid_xy_res
+
+occformer:
+  num_heads: 8
+  embed_dim: *embed_dim
+  max_num_agents: *max_num_agents
+  num_modes: *num_motion_modes
+  num_ref_points: 4
+  pred_horizon: 5
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  learnable_pe: True
+  num_tmlp_layers: 2
+  bev_feature_hw: *bev_feature_hw
+  bev_downsmaple_scale: 4
+  op_attn_scale : 2
+
+planformer:
+  num_heads: 8
+  embed_dim: *embed_dim
+  num_commands: 5
+  num_layers: 3
+  num_modes: *num_motion_modes
+  num_ref_points: 4
+  pred_horizon: 6
+  dim_feedforward: 512
+  dropout: 0.1
+  offset_scale: 1.0
+  learnable_pe: True
+  bev_feature_hw: *bev_feature_hw
