@@ -1,7 +1,8 @@
 import cv2
 import torch
 import numpy as np
-from typing import Tuple, Optional, List, Union
+import torch.nn.functional as F
+from typing import Tuple, Optional, Union
 
 
 def _safe_nanmin(data: torch.Tensor, dim: int) -> torch.Tensor:
@@ -57,7 +58,7 @@ def point_clouds_to_binary_bev_maps(
         point_clouds = point_clouds[None]
 
     binary_map = torch.zeros(point_clouds.shape[0], *map_hw, dtype=torch.float32, device=point_clouds.device)
-    points = point_clouds[..., :2].clone()
+    points  = point_clouds[..., :2].clone()
     points[..., 0] = (points[..., 0] - x_min) / (x_max - x_min)
     points[..., 1] = (points[..., 1] - y_min) / (y_max - y_min)
 
@@ -88,7 +89,6 @@ def generate_occupancy_map(
         x_max: float=51.2,
         y_min: float=-51.2,
         y_max: float=51.2,
-        point_clouds: Optional[torch.Tensor]=None
     ) -> torch.Tensor:
     
     """
@@ -111,12 +111,6 @@ def generate_occupancy_map(
 
     :y_max:
         maximum value along the y-axis of Ego vehicle frame
-
-    :point_clouds (optional): 
-        shape: (num_timesteps, num_points, D). If provided, it will be used to compute a detection 
-        instance agonistic binary occupancy map which will serve as a mask to be applied to the detection
-        level occupancy map made from the bounding box data of each agent across various timesteps from the
-        motion tracks.
 
     Returns
     --------------------------------
@@ -160,17 +154,6 @@ def generate_occupancy_map(
 
     occ_maps = occ_maps.astype(np.float32)
     occ_maps = torch.from_numpy(occ_maps)
-    
-    if point_clouds is not None:
-        binary_occ_maps = point_clouds_to_binary_bev_maps(
-            point_clouds, 
-            map_hw, 
-            x_min=x_min,
-            x_max=x_max,
-            y_min=y_min,
-            y_max=y_max,
-        ).cpu()
-        occ_maps *= binary_occ_maps[None]
     return occ_maps
 
 
@@ -299,21 +282,37 @@ def overlap_img_masks(masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return final_mask, sorted_indexes
 
 
+def savgol_kernel(num_coefs: int=5, num_power: int=4, device: Union[str, int, torch.device]="cpu") -> torch.Tensor:
+    coefs = torch.arange(-(num_coefs//2), num_coefs//2+1, device=device)
+    powers = torch.arange(num_power, device=device)
+    J = coefs[:, None].pow(powers[None, :]).float()
+    JTJ_inv = torch.linalg.inv(J.T @ J)
+    M = JTJ_inv @ J.T
+    return M
+
+
 def polylines_to_img_mask(
         polylines: torch.Tensor, 
         img_hw: Tuple[int, int], 
+        img_scale: Optional[float]=None,
         pad_vals: Optional[torch.Tensor]=None,
-        overlap: bool=True
+        overlap: bool=True,
+        smoothen: bool=False,
+        **kwargs
     ) -> Union[torch.Tensor, Optional[torch.Tensor]]:
     """
     polylines: (N, num_vertices, 2) (dtype must be int64), The last axis corresponds to x, y
 
     img_hw: [H, W] of generated mask image
 
+    new_img_hw: [new_H, new_W], applicable if you wish to increase resolution
+
     pad_vals: values used to pad the polylines (including EOS and PAD tokens)
 
     overlap: whether to overlap generated masks of each element (creating a (1, H, W) tensor) 
         or not (N,c H, W) tensor
+
+    smoothen: If True, apply smoothening kernel to the polyline vertices
     """
     assert polylines.dtype == torch.int64 and polylines.ndim == 3 and polylines.shape[2] == 2
 
@@ -322,6 +321,26 @@ def polylines_to_img_mask(
         invalid_mask = torch.isin(polylines, pad_vals)
         b_i, *_ = torch.where(invalid_mask)
         polylines[invalid_mask] = polylines[b_i[0::2], 0, :].flatten(start_dim=0, end_dim=1)
+
+    if img_scale is not None:
+        max_xy = torch.tensor([img_hw[1], img_hw[0]], device=polylines.device) - 1
+        new_wh = (max_xy + 1) * img_scale
+        img_hw = [new_wh[1].int().item(), new_wh[0].int().item()]
+        polylines = (new_wh - 1) * (polylines / max_xy)
+        polylines = F.interpolate(polylines.transpose(2, 1), scale_factor=img_scale, mode="linear")
+        polylines = polylines.transpose(2, 1).long()
+
+    if smoothen:
+        kernel = savgol_kernel(**kwargs, device=polylines.device)
+        kernel  = kernel[None, None, 0, :].tile(2, 1, 1).flip(-1)
+        pad_size = kernel.shape[-1] // 2
+        polylines = polylines.transpose(2, 1).float()
+        polylines = F.pad(polylines, (pad_size, pad_size), mode="replicate")
+        polylines = F.conv1d(polylines, weight=kernel, groups=2)
+        polylines = polylines.transpose(2, 1).long()
+
+    polylines[..., 0] = polylines[..., 0].clip(min=0, max=img_hw[1]-1)
+    polylines[..., 1] = polylines[..., 1].clip(min=0, max=img_hw[0]-1)
         
     device = polylines.device
     batch_indexes = torch.arange(polylines.shape[0], device=device)[:, None].tile(1, polylines.shape[1])

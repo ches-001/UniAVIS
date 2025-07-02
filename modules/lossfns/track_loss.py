@@ -45,7 +45,7 @@ class TrackLoss(nn.Module):
             self, 
             preds: torch.Tensor, 
             targets: torch.Tensor
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
         device = preds.device
 
@@ -92,10 +92,10 @@ class TrackLoss(nn.Module):
 
         track_ids = targets[batch_indexes, target_indexes, 0]
 
-        track_mask = track_ids.clone()
-        track_mask[track_mask != -999] = 1
-        track_mask[track_mask == -999] = 0
-        track_mask = track_mask.bool()
+        pred_track_mask = track_ids.clone()
+        pred_track_mask[pred_track_mask != -999] = 1
+        pred_track_mask[pred_track_mask == -999] = 0
+        pred_track_mask = pred_track_mask.bool()
 
         # The loss mask is a num_obj x num_obj matrix where the only matched pred and target indexes are
         # set, to compute loss for only successful matches
@@ -119,7 +119,7 @@ class TrackLoss(nn.Module):
             (self.angle_lambda * angle_loss)
         )
 
-        return loss, track_ids, track_mask
+        return loss, pred_indexes, target_indexes, track_ids, pred_track_mask
     
 
     def _next_frame_forward(
@@ -127,7 +127,7 @@ class TrackLoss(nn.Module):
             preds: torch.Tensor, 
             targets: torch.Tensor, 
             prev_track_ids: torch.Tensor
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
 
         assert preds.shape[:2] == targets.shape[:2]
@@ -166,6 +166,9 @@ class TrackLoss(nn.Module):
         # and ones from current frame not present in previous frame (new detections)
         nomatch_mask = (prev_track_ids[:, :, None] != track_ids[:, None, :])
         
+        flat_pred_idx = None
+        flat_target_idx = None
+
         if torch.any(match_mask):
             b_idx, pred_idx, target_idx = torch.where(match_mask)
 
@@ -214,16 +217,32 @@ class TrackLoss(nn.Module):
             new_targets.fill_(-999)
             new_preds[nomatch_pred_mask] = preds[nomatch_pred_mask]
             new_targets[nomatch_target_mask] = targets[nomatch_target_mask]
-            new_loss, new_track_ids, new_track_mask = self._first_frame_forward(new_preds, new_targets)
+            (
+                new_loss, pred_indexes, target_indexes, new_track_ids, new_track_mask
+            ) = self._first_frame_forward(new_preds, new_targets)
+
             output_track_ids[new_track_mask] = new_track_ids[new_track_mask]
             loss = loss + new_loss.mean()
 
-        track_mask = output_track_ids.clone()
-        track_mask[track_mask != -999] = 1
-        track_mask[track_mask == -999] = 0
-        track_mask = track_mask.bool()
+        # set the matching pred and target indexes
+        if flat_pred_idx is not None:
+            pred_indexes = pred_indexes.flatten(start_dim=0, end_dim=1)
+            target_indexes = target_indexes.flatten(start_dim=0, end_dim=1)
 
-        return loss, output_track_ids, track_mask
+            # FYI, the next two lines are correct. pred_indexes is sorted and target_indexes
+            # is ordered according to how pred_indexes is sorted
+            pred_indexes[flat_pred_idx] = flat_pred_idx % preds.shape[1]
+            target_indexes[flat_pred_idx] = flat_target_idx % targets.shape[1]
+
+            pred_indexes = pred_indexes.unflatten(dim=0, sizes=preds.shape)
+            target_indexes = target_indexes.unflatten(dim=0, sizes=targets.shape)
+
+        pred_track_mask = output_track_ids.clone()
+        pred_track_mask[pred_track_mask != -999] = 1
+        pred_track_mask[pred_track_mask == -999] = 0
+        pred_track_mask = pred_track_mask.bool()
+
+        return loss, pred_indexes, target_indexes, output_track_ids, pred_track_mask
 
 
     def _optimal_linear_assign(self, cost_matrix: torch.Tensor) -> torch.Tensor:

@@ -271,8 +271,8 @@ class MotionFormer(BaseFormer):
         :motion_queries: (N, num_agents, k, embed_dim), MotionFormer final context query output
 
         :mode_traj: (N, num_agents, k, T, 5), batch of estimated k-mode T-long trajectories for each agent
-                            (k = number of modes, T = length of trajectory). 
-                            Last dim corresponds to (u_x, u_y, log_sigma_x, log_sigma_y, x_y_corr)
+            in agent level frame (k = number of modes, T = length of trajectory). Last dim corresponds to 
+            (u_x, u_y, log_sigma_x, log_sigma_y, x_y_corr)
 
         :mode_scores: (N, num_agents, K), batch of estimated probability scores for each k-mode
 

@@ -29,7 +29,9 @@ class PillarFeatureGenerator(nn.Module):
 
         Returns
         --------------------------------
-        :output: (N, max_pillars, max_points, 9)
+        :output: (N, max_pillars, max_points, 9), with the last dimension being:
+            (x, y, z, r, x_c, y_c, z_c, x_p, y_p), where subscript c and p denote distance to arithmetic mean
+            of all points in a pillar and the offset from the pillar x, y center
 
         :output_pillars: (N, max_pillars), output pillar indexes
         """
@@ -37,11 +39,20 @@ class PillarFeatureGenerator(nn.Module):
         device       = point_clouds.device
         x_range      = self.xyz_range[0]
         y_range      = self.xyz_range[1]
-        min_xy       = torch.tensor([x_range[0], y_range[0]], device=device)
-        max_xy       = torch.tensor([x_range[1], y_range[1]], device=device)
+        z_range      = self.xyz_range[2]
+        min_xyz      = torch.tensor([x_range[0], y_range[0], z_range[0]], device=device)
+        max_xyz      = torch.tensor([x_range[1], y_range[1], z_range[1]], device=device)
+        min_xy       = min_xyz[:2]
+        max_xy       = max_xyz[:2]
         pillar_wh    = torch.tensor(self.pillar_wh, device=device)
         num_xy_grids = torch.ceil((max_xy - min_xy) / pillar_wh)
         num_xy_grids = num_xy_grids.to(device=device, dtype=torch.int64)
+
+        # scale from min_xy, max_xy to (-1, -1, -1), (1, 1, 1)
+        pillar_wh             = (2 * pillar_wh) / (max_xy - min_xy)
+        point_clouds[..., :3] = (2 * (point_clouds[..., :3] - min_xyz) / (max_xyz - min_xyz)) - 1
+        min_xy                = min_xy / max_xy
+        max_xy                = max_xy / max_xy
 
         # pillar i (x-axis / col idx), j (y-axis / row idx) indexes (The are indexes of all the pillars each
         # point belongs to, so these are indexes of non-empty pillars)

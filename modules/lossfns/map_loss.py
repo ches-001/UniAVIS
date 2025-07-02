@@ -25,7 +25,7 @@ class VectorMapLoss(TrackLoss):
             pred_detections: torch.Tensor,
             target_polylines: torch.Tensor, 
             target_detections: torch.Tensor
-        ) -> torch.Tensor:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         pred_polylines: (N, num_elements, num_vertices, 2, num_grid)
             last axis corresponds to x, y
@@ -65,7 +65,7 @@ class VectorMapLoss(TrackLoss):
         polygen_loss = polygen_loss.mean()
 
         loss = det_loss + polygen_loss
-        return loss
+        return loss, pred_indexes, target_indexes
     
 
     def _forward_match(
@@ -132,7 +132,7 @@ class RasterMapLoss(VectorMapLoss):
             pred_detections: torch.Tensor,
             target_polylines: torch.Tensor,
             target_detections: torch.Tensor,
-        ) -> torch.Tensor:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         protos (k, H, W), where k is number of segmentation coefficients
 
@@ -184,4 +184,4 @@ class RasterMapLoss(VectorMapLoss):
         polygen_loss = F.binary_cross_entropy_with_logits(pred_seg_masks, target_seg_masks, pos_weight=pos_weight, reduction="mean")
         
         loss = det_loss + polygen_loss
-        return loss
+        return loss, pred_indexes, target_indexes

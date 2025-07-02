@@ -24,7 +24,7 @@ class FrameData(DeviceChangeMixin):
 
     point_cloud: Unstructured array of 4D points with shape [Np, D], where Np and D are the number of points 
         and dimension of each point, here D = 4, 3 spatial axes x, y, z in the  ego vehicle frame and an axis 
-        for reflectance r.
+        for reflectance / intensity r.
 
     laser_detections: This tensor contains objects / agents detected with the LIDAR sensors as 3D bounding boxes mapped
         to the ego vehicle frame. The tensor is of shape [Nd_lidar, 9], where Nd_lidar is the number of unique objects
@@ -56,8 +56,9 @@ class FrameData(DeviceChangeMixin):
         of shape [num_elements, 5] (4 for box data (x, y, w, h) and 1 for class label)
 
     ego_trajectory: This tensor contains movement trajectory (waypoints) of ego vehicle in ego vehicle coordinates, The tensor 
-        is of shape [plan_timesteps, 2]. It only has two dimensions because it the trajectory corresponds to movement along the
-        BEV frame, which is a 2D frame
+        is of shape [max(motion_timesteps, plan_timesteps), 2]. It only has two dimensions because it the trajectory corresponds
+        to movement along the BEV frame, which is a 2D frame.
+        The ego trajectory serves as targets to ego motion from the MotionFormer, and planned trajectory from the PlanFormer.
     """
     cam_views: torch.Tensor
     point_cloud: torch.Tensor

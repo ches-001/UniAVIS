@@ -34,6 +34,7 @@ class PlanLoss(nn.Module):
             pred_ego_box_size: torch.Tensor,
             multiagent_box_sizes: torch.Tensor,
             multiagents_trajs: torch.Tensor,
+            agent2scene_transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
         pred_ego_traj: (N, T, 2), predicted trajectory (x, y)
@@ -46,6 +47,9 @@ class PlanLoss(nn.Module):
 
         multiagents_trajs: (N, num_agents, T, 2), trajectory of other agents (no ego trajectory)
             NOTE: This trajectory must be in ego (scene-level) vehicle frame
+
+        agent2scene_transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
+            if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
         """
         device = pred_ego_traj.device
         num_timesteps = pred_ego_traj.shape[1]
@@ -63,6 +67,15 @@ class PlanLoss(nn.Module):
         weights_and_tilda = torch.tensor(self.weight_tilda_pair, dtype=multiagent_box_sizes.dtype, device=device)
         weights = weights_and_tilda[None, None, :, 0]
         tildas = weights_and_tilda[None, None, :, 1, None, None]
+        
+        if agent2scene_transform is not None:
+            assert (
+                agent2scene_transform.shape[-1] == 3 and
+                agent2scene_transform.shape[-2] == agent2scene_transform.shape[-1]
+            )
+            R = agent2scene_transform[..., :2, :2]
+            T = agent2scene_transform[..., :2, [2]]
+            multiagents_trajs = (multiagents_trajs @ R.transpose(-1, -2)) + T.transpose(-1, -2)
 
         multiagent_box_sizes = multiagent_box_sizes[:, :, None, :].tile(1, 1, num_timesteps, 1)
         multiagent_box_sizes = multiagent_box_sizes[:, :, None, :, :] + tildas

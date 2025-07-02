@@ -358,7 +358,7 @@ def process_perception_frame(
     map_polylines = construct_frame_map_elements(
         map_features, 
         frame.pose, 
-        xy_min=xy_min, 
+        xy_min=xy_min,
         xy_max=xy_max, 
         eos_token=eos_token,
         pad_token=pad_token,
@@ -378,12 +378,12 @@ def process_perception_frame(
 
     point_cloud = np.concatenate(points, axis=0)
     camera_proj = np.concatenate(cp_points, axis=0)
-
-    points_mask = (point_cloud[:, :2] >= xy_min) & (point_cloud[:, :2] <= xy_max)
+    
+    points_mask = (point_cloud[:, 3:5] >= xy_min) & (point_cloud[:, 3:5] <= xy_max)
     points_mask = points_mask[:, 0] & points_mask[:, 1]
     
-    point_cloud = interpolate_points(point_cloud[points_mask], other_kwargs["num_laser_points"])
-    camera_proj = interpolate_points(camera_proj[points_mask], other_kwargs["num_laser_points"])
+    point_cloud = interpolate_points(point_cloud[points_mask], other_kwargs["num_laser_points"]).astype(np.float32)
+    camera_proj = interpolate_points(camera_proj[points_mask], other_kwargs["num_laser_points"]).astype(np.float32)
     
     point_cloud_path = os.path.join(POINT_CLOUD_LOCAL_PATH, f"{sample_name}_frame_{frame_idx}.npy")
     np.save(point_cloud_path, point_cloud)

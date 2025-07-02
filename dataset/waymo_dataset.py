@@ -238,7 +238,7 @@ class WaymoDataset(Dataset):
 
         dt = next_timestamp - current_timestamp
         iter_start = frame_idx
-        iter_step = max(1, int(1 / (dt * self.motion_sample_freq)))
+        iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
         iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
 
         track_maps = {}
@@ -248,7 +248,6 @@ class WaymoDataset(Dataset):
 
             for obj_idx in range(0, len(laser_labels_list)):
                 obj_id = laser_labels_list[obj_idx]["id"]
-                obj_type = laser_labels_list[obj_idx]["type"]
                 obj_3d_bbox = laser_labels_list[obj_idx]["box"]
                 if (
                     (obj_3d_bbox["center_x"] < self.xyz_range[0][0] or obj_3d_bbox["center_x"] > self.xyz_range[0][1])
@@ -287,7 +286,6 @@ class WaymoDataset(Dataset):
             x_max=self.xyz_range[0][1],
             y_min=self.xyz_range[1][0],
             y_max=self.xyz_range[1][1],
-            point_clouds=None
         )
         return occ_map
 
@@ -307,11 +305,22 @@ class WaymoDataset(Dataset):
         point_cloud_path = frame_dict["laser"]["point_cloud_path"]
         point_cloud = np.load(point_cloud_path)
         point_cloud = torch.from_numpy(point_cloud)
+        
+        # shape: (num_points, 4), ), (x, y, z, intensity)
+        point_cloud = point_cloud[..., [3, 4, 5, 1]]
+        points_mask = (
+            (point_cloud[:, 0] >= self.xyz_range[0][0]) & (point_cloud[:, 0] <= self.xyz_range[0][1]) &
+            (point_cloud[:, 1] >= self.xyz_range[1][0]) & (point_cloud[:, 1] <= self.xyz_range[1][1]) &
+            (point_cloud[:, 2] >= self.xyz_range[2][0]) & (point_cloud[:, 2] <= self.xyz_range[2][1])
+        )
+        point_cloud = point_cloud[points_mask]
+
         if point_cloud.shape[0] != self.num_cloud_points:
             point_cloud = F.interpolate(point_cloud.permute(1, 0)[None], size=self.num_cloud_points, mode="linear")
             point_cloud = point_cloud[0].permute(1, 0)
-        # shape: (num_points, 4)
-        point_cloud = point_cloud[..., [3, 4, 5, 0]]
+
+        point_cloud = point_cloud.to(dtype=torch.float32)
+        point_cloud[..., -1] = torch.tanh(point_cloud[..., -1])
         return point_cloud
 
 
@@ -390,9 +399,7 @@ class WaymoDataset(Dataset):
         polylines = polylines.reshape(polylines.shape[0], polylines.shape[1] // 2, 2)
 
         points_pad_size = max(0, self.max_num_polyline_points - polylines.shape[1])
-        print(polylines.shape)
         polylines = np.pad(polylines, ((0, 0), (0, points_pad_size), (0, 0)), constant_values=pad_token)
-        print(polylines.shape)
 
         eos_mask = (polylines == eos_token)
         pad_mask = (polylines == pad_token)
@@ -450,10 +457,12 @@ class WaymoDataset(Dataset):
         current_timestamp = sample_dict[frame_idx]["timestamp_seconds"]
         next_timestamp = sample_dict[frame_idx + 1]["timestamp_seconds"]
 
+        horizon = max(self.planning_horizon, self.motion_horizon)
+        
         dt = next_timestamp - current_timestamp
         iter_start = frame_idx + 1
-        iter_step = max(1, int(1 / (dt * self.motion_sample_freq)))
-        iter_end = min(num_frames, frame_idx + (iter_step * self.planning_horizon) + 1)
+        iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
+        iter_end = min(num_frames, frame_idx + (iter_step * horizon) + 1)
 
         global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)

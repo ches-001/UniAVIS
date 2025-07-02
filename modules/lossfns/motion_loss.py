@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Optional, Tuple
 
 
 class MotionLoss(nn.Module):
@@ -27,29 +28,38 @@ class MotionLoss(nn.Module):
             self, 
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
-            target_motion: torch.Tensor
+            target_motion: torch.Tensor,
+            agent2scene_transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
         pred_motion_modes: (N, num_agents, k, T, 5), where k and T are number of modes and timesteps
 
         pred_mode_proba: (N, num_agents, k)
 
-        target_motion: (N, num_agents, T, 2)
-        """
+        target_motion: (N, num_agents, T, 2), this motion data is in scene (ego) level
 
+        agent2scene_transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
+            if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
+        """
+        if agent2scene_transform is not None:
+            assert (
+                agent2scene_transform.shape[-1] == 3 and
+                agent2scene_transform.shape[-2] == agent2scene_transform.shape[-1]
+            )
         if self.as_gmm:
             if self.collapsed_gmm:
-                return self._collapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion)
+                return self._collapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)
             else:
-                return self._uncollapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion)
-        return self._no_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion)
+                return self._uncollapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)
+        return self._no_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)
 
 
     def _collapsed_mixture_forward(
             self,
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
-            target_motion: torch.Tensor
+            target_motion: torch.Tensor,
+            agent2scene_transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
 
         pred_mode_proba = pred_mode_proba[..., None, None, None]
@@ -77,6 +87,9 @@ class MotionLoss(nn.Module):
 
         loss_mask = (target_motion != -999).all(dim=-1)
 
+        if agent2scene_transform is not None:
+            mixture_mu, mixture_covar = self._transform_mu_and_covar(mixture_mu, mixture_covar, agent2scene_transform)
+
         log_proba = self._compute_dist_log_proba(input, mixture_mu, mixture_covar)
         log_proba = log_proba[loss_mask]
         log_proba = (-log_proba).mean()
@@ -87,7 +100,8 @@ class MotionLoss(nn.Module):
             self,
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
-            target_motion: torch.Tensor
+            target_motion: torch.Tensor,
+            agent2scene_transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         
         pred_mode_proba = pred_mode_proba[..., None]
@@ -108,6 +122,9 @@ class MotionLoss(nn.Module):
 
         loss_mask = (target_motion != -999).all(dim=-1)
 
+        if agent2scene_transform is not None:
+            mu, covar = self._transform_mu_and_covar(mu, covar, agent2scene_transform[:, :, None])
+
         log_pdf = self._compute_dist_log_proba(input, mu, covar)
         log_proba = torch.log(pred_mode_proba)
 
@@ -120,7 +137,8 @@ class MotionLoss(nn.Module):
             self,
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
-            target_motion: torch.Tensor
+            target_motion: torch.Tensor,
+            agent2scene_transform: Optional[torch.Tensor]
         ) -> torch.Tensor:
         
         num_modes = pred_motion_modes.shape[2]
@@ -167,6 +185,9 @@ class MotionLoss(nn.Module):
         motion_loss_mask = valid_target_mask
         mode_loss_mask = motion_loss_mask.any(dim=-1)
         
+        if agent2scene_transform is not None:
+            mu, covar = self._transform_mu_and_covar(mu, covar, agent2scene_transform)
+            
         log_pdf = self._compute_dist_log_proba(input, mu, covar)
         log_pdf = log_pdf[motion_loss_mask]
         log_pdf = log_pdf.mean()
@@ -175,6 +196,22 @@ class MotionLoss(nn.Module):
         loss = -((self.cls_lambda * log_proba) + (self.reg_lambda * log_pdf))
         return loss
     
+
+    def _transform_mu_and_covar(
+            self, 
+            mu: torch.Tensor, 
+            covar: torch.Tensor, 
+            transform: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        R = transform[..., :2, :2]
+        T = transform[..., :2, [2]]
+        R_T = R.transpose(-1, -2)
+        mu = (mu[..., 0] @ R_T) + T.transpose(-1, -2)
+        mu = mu[..., None]
+        covar = R[..., None, :, :] @ covar @ R_T[..., None, :, :]
+        return mu, covar
+
 
     def _compute_dist_log_proba(
             self, 
