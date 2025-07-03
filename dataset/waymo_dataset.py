@@ -485,7 +485,7 @@ class WaymoDataset(Dataset):
 
     @check_perf
     def _get_high_level_command(self, ego_trajectory: torch.Tensor) -> torch.Tensor:
-        # to get high level command of ego planning motion, compute the cross and dot roducts of the last
+        # to get high level command of ego planning motion, compute the cross and dot products of the last
         # direction vector, relative to a reference vector. The reference vector in this case is [1.0, 0.0]
         # which corresponds to straight motion along the x axis, and the last direction vector is [xt - x0, yt - y0]
         # which is essentially equal to [xt, yt], because the ego vehicle is always situated at the reference point 
