@@ -59,6 +59,9 @@ class FrameData(DeviceChangeMixin):
         is of shape [max(motion_timesteps, plan_timesteps), 2]. It only has two dimensions because it the trajectory corresponds
         to movement along the BEV frame, which is a 2D frame.
         The ego trajectory serves as targets to ego motion from the MotionFormer, and planned trajectory from the PlanFormer.
+
+    command: This tensor encodes high-level commands for ego motion planning (like 'turn-left', 'turn-right', 'go-straight', etc), 
+        it serves as input to the PlanFormer is of shape (1 x 1).
     """
     cam_views: torch.Tensor
     point_cloud: torch.Tensor
@@ -71,6 +74,7 @@ class FrameData(DeviceChangeMixin):
     map_elements_polylines: Optional[torch.Tensor] = None
     map_elements_boxes: Optional[torch.Tensor] = None
     ego_trajectory: Optional[torch.Tensor] = None
+    command: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -92,7 +96,8 @@ class MultiFrameData(FrameData):
             occupancy_map = frames[-1].occupancy_map,
             map_elements_polylines = frames[-1].map_elements_polylines,
             map_elements_boxes = frames[-1].map_elements_boxes,
-            ego_trajectory = frames[-1].ego_trajectory
+            ego_trajectory = frames[-1].ego_trajectory,
+            command = frames[-1].command
         )
 
         for frame_idx in range(0, len(frames)):
@@ -140,7 +145,8 @@ class BatchMultiFrameData(FrameData):
             occupancy_map = [],
             map_elements_polylines = [],
             map_elements_boxes = [],
-            ego_trajectory = []
+            ego_trajectory = [],
+            command = []
         )
         
         items_to_pad = ["cam_views", "point_cloud", "ego_pose"]

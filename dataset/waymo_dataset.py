@@ -38,16 +38,18 @@ class WaymoDataset(Dataset):
             max_num_map_elements: int=100,
             max_num_polyline_points: int=1000,
             motion_sample_freq: float=2.0,
-            pad_polylines_out_of_index: bool=False
+            pad_polylines_out_of_index: bool=False,
+            motion_command_opts: Optional[Dict[str, Any]]=None,
+            stop_command_disp_thresh: float=0.5
         ):
         self.data = (
-            data_or_path 
-            if isinstance(data_or_path, dict) 
+            data_or_path
+            if isinstance(data_or_path, dict)
             else load_pickle_file(data_or_path)
         )
         self.metadata = (
-            metadata_or_path 
-            if isinstance(metadata_or_path, dict) 
+            metadata_or_path
+            if isinstance(metadata_or_path, dict)
             else load_json_file(metadata_or_path)
         )
         self.motion_horizon = motion_horizon
@@ -64,6 +66,12 @@ class WaymoDataset(Dataset):
         self.max_num_polyline_points = max_num_polyline_points
         self.motion_sample_freq = motion_sample_freq
         self.pad_polylines_out_of_index = pad_polylines_out_of_index
+        self.stop_command_disp_thresh = stop_command_disp_thresh
+        self.motion_command_opts = motion_command_opts or {
+            "straight": (0, -10, 10),
+            "left": (1, 10, float("inf")),
+            "right": (2, -float("inf"), -10),
+        }
         
         self._set_data_len_and_indexes()
 
@@ -175,11 +183,13 @@ class WaymoDataset(Dataset):
         map_elements_boxes = None
         ego_trajectory = None
         motion_tracks = None
+        command = None
 
         if not is_partial_data:
             motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
             occupancy_map = self._generate_occupancy_map(motion_tracks)
             ego_trajectory = self._get_planning_trajectory(sample_dict, frame_idx, ego_pose)
+            command = self._get_high_level_command(ego_trajectory)
             map_elements_polylines, map_elements_boxes = self._load_bev_map_elements(frame_dict)
             motion_tracks = motion_tracks[:, 1:, :2]
 
@@ -223,7 +233,8 @@ class WaymoDataset(Dataset):
             occupancy_map=occupancy_map,
             map_elements_polylines=map_elements_polylines,
             map_elements_boxes=map_elements_boxes,
-            ego_trajectory=ego_trajectory
+            ego_trajectory=ego_trajectory,
+            command=command
         )
         return frame_data
 
@@ -467,9 +478,35 @@ class WaymoDataset(Dataset):
         global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)
         global_positions = torch.from_numpy(global_positions)
-        ego_positions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
+        ego_trajectory = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
         # shape: (timesteps, 2)
-        return ego_positions[:, :2].to(dtype=torch.float32)
+        return ego_trajectory[:, :2].to(dtype=torch.float32)
+    
+
+    @check_perf
+    def _get_high_level_command(self, ego_trajectory: torch.Tensor) -> torch.Tensor:
+        # to get high level command of ego planning motion, compute the cross and dot roducts of the last
+        # direction vector, relative to a reference vector. The reference vector in this case is [1.0, 0.0]
+        # which corresponds to straight motion along the x axis, and the last direction vector is [xt - x0, yt - y0]
+        # which is essentially equal to [xt, yt], because the ego vehicle is always situated at the reference point 
+        # [0, 0]. Next we compute the arctan2 between the cross and dot product, this is equivalent to computing the
+        # arctan2 between the sin and cos of the angles between the two vectors.
+        x0, y0 = 1.0, 0.0
+        xt, yt = ego_trajectory[min(self.planning_horizon, ego_trajectory.shape[0]) - 1]
+
+        disp = torch.sqrt(xt.pow(2) + yt.pow(2))
+        if disp < self.stop_command_disp_thresh:
+            return torch.tensor([len(self.motion_command_opts)], dtype=torch.int64)
+
+        cross_prod = (x0 * yt) - (y0 * xt)
+        dot_prod = (x0 * xt) + (y0 * yt)
+        angle = torch.arctan2(cross_prod, dot_prod)
+        angle = torch.rad2deg(angle)
+        for k in self.motion_command_opts:
+            opt = self.motion_command_opts[k]
+            if angle >= opt[1] and angle < opt[2]:
+                return torch.tensor([opt[0]], dtype=torch.int64)
+        raise Exception(f"angle: {angle} degs not covered in motion_command_opts {self.motion_command_opts}")
         
     
     @check_perf
