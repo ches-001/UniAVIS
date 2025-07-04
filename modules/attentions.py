@@ -609,18 +609,17 @@ class TemporalSelfAttention(DeformableAttention):
         :output: (N, H_bev * W_bev, C_bev), output BEV features / queries that have been attended to temporally
         """
 
-        batch_size, _, C_bev = bev_queries.shape
-        H_bev, W_bev   = bev_spatial_shape[0]
-        H_bev          = H_bev.item()
-        W_bev          = W_bev.item()
-        device         = bev_queries.device
+        batch_size   = bev_queries.shape[0]
+        H_bev, W_bev = bev_spatial_shape[0]
+        H_bev        = H_bev.item()
+        W_bev        = W_bev.item()
+        device       = bev_queries.device        
 
-        # ref_points for deformable attention: (batch_size, H_bev * W_bev, 1, 2)
-        ref_points  = TemporalSelfAttention.generate_standard_ref_points(
+        ref_points = TemporalSelfAttention.generate_standard_ref_points(
             (H_bev, W_bev), batch_size, device=device, normalize=True
         )
         ref_points = ref_points[..., None, :]
-
+        
         # for bev_histories to be None, it implies that we are working with the very first timestep of the
         # simulation. As such, the proposed temporal self attention will simply decay to a standard self
         # attention with deformable attention mechanism.
@@ -635,7 +634,6 @@ class TemporalSelfAttention(DeformableAttention):
             return output
 
         assert transition_matrices is not None
-
         # The goal of this subsection before the deformable attention section is to align the BEV feature 
         # history (B{t-1}) to the current BEV feature (B{t}). This is to ensure that we account fo the spatial 
         # change that has occured in the newly created BEV feature (B{t}).
@@ -651,8 +649,40 @@ class TemporalSelfAttention(DeformableAttention):
         # Both steps can be combined into one step with a single transformation matrix which will serve as our
         # transition matrix, pretty neat.
 
-        x_range              = (self.grid_xy_res[0] * W_bev / 2) - (self.grid_xy_res[0] / 2)
-        y_range              = (self.grid_xy_res[1] * H_bev / 2) - (self.grid_xy_res[1] / 2)
+        bev_histories = TemporalSelfAttention.align_bev_histories(
+            bev_histories=bev_histories,
+            grid_xy_res=self.grid_xy_res,
+            bev_spatial_shape=bev_spatial_shape,
+            transition_matrices=transition_matrices,
+            device=device
+        )
+
+        output = super(TemporalSelfAttention, self).forward(
+            bev_queries,
+            ref_points,
+            bev_histories,
+            value_spatial_shapes=bev_spatial_shape,
+            normalize_ref_points=False
+        )
+        return output
+    
+    @staticmethod
+    def align_bev_histories(
+        bev_histories: torch.Tensor,
+        grid_xy_res: Tuple[float, float],
+        bev_spatial_shape: torch.Tensor,
+        transition_matrices: torch.Tensor,
+        device: Union[str, int, torch.device]="cpu"
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        H_bev, W_bev = bev_spatial_shape[0]
+        H_bev        = H_bev.item()
+        W_bev        = W_bev.item()
+
+        batch_size, _, C_bev = bev_histories.shape
+
+        x_range              = (grid_xy_res[0] * W_bev / 2) - (grid_xy_res[0] / 2)
+        y_range              = (grid_xy_res[1] * H_bev / 2) - (grid_xy_res[1] / 2)
         xindex               = torch.linspace(-x_range, x_range, steps=W_bev, device=device)
         yindex               = torch.linspace(-y_range, y_range, steps=H_bev, device=device)
         ygrid, xgrid         = torch.meshgrid([yindex, xindex], indexing="ij")
@@ -667,16 +697,9 @@ class TemporalSelfAttention(DeformableAttention):
         bev_histories        = F.grid_sample(
             bev_histories, aligned_grid, mode="bilinear", padding_mode="zeros", align_corners=True
         )
-        
         bev_histories = bev_histories.permute(0, 2, 3, 1).reshape(batch_size, H_bev * W_bev, C_bev)
-        output = super(TemporalSelfAttention, self).forward(
-            bev_queries,
-            ref_points,
-            bev_histories,
-            value_spatial_shapes=bev_spatial_shape,
-            normalize_ref_points=False
-        )
-        return output
+        return bev_histories
+
 
 
 class SpatialCrossAttention(MultiViewDeformableAttention):
@@ -712,7 +735,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
             self, 
             bev_queries: torch.Tensor,
             multiscale_fmaps: torch.Tensor,
-            bev_spatial_shape: torch.Tensor,
+            bev_spatial_shape: Tuple[int, int],
             multiscale_fmap_shapes: torch.Tensor,
             z_refs: torch.Tensor,
             cam_proj_matrices: torch.Tensor,
@@ -780,37 +803,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
             cam_proj_matrices: torch.Tensor,
             device: Union[str, int, torch.device]="cpu"
         ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Input
-        --------------------------------
-        :batch_size: Batch size for attention mask and reference points
 
-        :num_views: Number of spatial views for the attention mask and reference points
-
-        :grid_xy_res: x and y resolution of grid cells in meters (or whatever unit you use)
-
-        :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
-
-        :multiscale_fmap_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
-
-        :img_spatial_shape: (1, 2) spatial resolution of image [H, W]
-
-        :z_refs: (num_z_ref_points, ) z-axis reference points
-
-        :cam_proj_matrices: (V, 3, 4) projection matrix for each camera, from real 3D coord (ego vehicle frame) to 3D image
-            coord. This matrix is the product of the 3 x 3 (homogenized to 3 x 4) camera intrinsic matrix and the 4 x 4 camera
-            camera extrinsic-inverse matrix with homogenized coordinates.
-
-        :device: Compute device
-
-        Returns
-        --------------------------------
-        :sca_ref_points: (N, query_len, num_views, L, z_refs, 2) for reference points for 
-            value (multiscale feature maps) eg: [[x0, y0], ...[xn, yn]]
-
-        :sca_attention_mask: For boolean masks, (0 if not to attend to, else 1) if mask is float type 
-            with continuous values it is directly multiplied with the attention weights
-        """
         H_bev, W_bev   = bev_spatial_shape[0]
         H_bev          = H_bev.item()
         W_bev          = W_bev.item()

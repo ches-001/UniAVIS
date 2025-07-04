@@ -3,7 +3,12 @@ import torch.nn as nn
 from torchvision.models import resnet
 from .base import BaseFormer
 from .backbone import ResNetBackBone
-from .attentions import TemporalSelfAttention, SpatialCrossAttention, MultiViewDeformableAttention
+from .attentions import (
+    DeformableAttention, 
+    MultiViewDeformableAttention, 
+    TemporalSelfAttention, 
+    SpatialCrossAttention
+)
 from .common import AddNorm, PosEmbedding2D, SimpleMLP
 from typing import Optional, Tuple, Type, Union
     
@@ -20,7 +25,6 @@ class BEVFormerEncoderLayer(nn.Module):
             offset_scale: float=1.0,
             num_views: int=6,
             num_fmap_levels: int=4,
-            grid_xy_res: Tuple[float, float]=(0.512, 0.512),
         ):
         super(BEVFormerEncoderLayer, self).__init__()
 
@@ -33,12 +37,14 @@ class BEVFormerEncoderLayer(nn.Module):
         self.num_views        = num_views
         self.num_fmap_levels  = num_fmap_levels
 
-        self.temporal_self_attn = TemporalSelfAttention(
+        self.temporal_self_attn = DeformableAttention(
             num_heads=self.num_heads, 
             embed_dim=self.embed_dim, 
             num_ref_points=self.num_ref_points, 
             dropout=dropout, 
-            offset_scale=self.offset_scale
+            offset_scale=self.offset_scale,
+            num_fmap_levels=1,
+            concat_vq_for_offset=True
         )
         self.add_norm1          = AddNorm(self.embed_dim)
         self.spatial_cross_attn = MultiViewDeformableAttention(
@@ -50,6 +56,7 @@ class BEVFormerEncoderLayer(nn.Module):
             offset_scale=self.offset_scale,
             num_views=self.num_views,
             num_fmap_levels=self.num_fmap_levels,
+            concat_vq_for_offset=False
         )
         self.add_norm2          = AddNorm(self.embed_dim)
         self.mlp                = SimpleMLP(self.embed_dim, self.embed_dim, self.dim_feedforward)
@@ -64,6 +71,7 @@ class BEVFormerEncoderLayer(nn.Module):
             sca_attention_mask: torch.Tensor,
             multiscale_fmap_shapes: torch.Tensor,
             transition_matrices: torch.Tensor,
+            tsa_ref_points: torch.Tensor,
             bev_histories: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
 
@@ -87,18 +95,24 @@ class BEVFormerEncoderLayer(nn.Module):
 
         :transition_matrices: (N, 3, 3), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
 
+        :tsa_ref_points: (N, query_len, 1, 2)
+
         :bev_histories: (N, H_bev * W_bev, C_bev), BEV features from previous timestep t-1
 
         Returns
         --------------------------------
         :output: (N, H_bev * W_bev, C_bev), output BEV queries to be fed into the next layer
         """
-        
+
+        if bev_histories is None:
+            bev_histories = bev_queries
+
         out1 = self.temporal_self_attn(
-            bev_queries=bev_queries,
-            bev_spatial_shape=bev_spatial_shape,
-            bev_histories=bev_histories, 
-            transition_matrices=transition_matrices, 
+            queries=bev_queries, 
+            ref_points=tsa_ref_points, 
+            value=bev_queries,
+            value_spatial_shapes=bev_spatial_shape,
+            normalize_ref_points=False 
         )
 
         out2 = self.add_norm1(out1, bev_queries)
@@ -176,7 +190,6 @@ class BEVFormer(BaseFormer):
             offset_scale=self.offset_scale,
             num_views=self.num_views,
             num_fmap_levels=self.num_fmap_levels,
-            grid_xy_res=self.grid_xy_res
         ) for _ in range(self.num_layers)])
     
 
@@ -252,6 +265,22 @@ class BEVFormer(BaseFormer):
             device=device
         )
 
+        tsa_ref_points = TemporalSelfAttention.generate_standard_ref_points(
+            self.bev_query_hw, 
+            batch_size=batch_size, 
+            device=device, normalize=True
+        )
+        tsa_ref_points = tsa_ref_points[..., None, :]
+
+        if bev_histories is not None:
+            bev_histories = TemporalSelfAttention.align_bev_histories(
+                bev_histories, 
+                grid_xy_res=self.grid_xy_res,
+                bev_spatial_shape=bev_spatial_shape,
+                transition_matrices=transition_matrices,
+                device=device
+            )
+
         for encoder_idx in range(0, len(self.encoder_modules)):
             bev_features = self.encoder_modules[encoder_idx](
                 bev_queries=bev_features, 
@@ -261,6 +290,7 @@ class BEVFormer(BaseFormer):
                 sca_attention_mask=sca_attention_mask,
                 multiscale_fmap_shapes=multiscale_fmap_shapes,
                 transition_matrices=transition_matrices,
+                tsa_ref_points=tsa_ref_points,
                 bev_histories=bev_histories
             )
             
