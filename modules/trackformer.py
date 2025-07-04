@@ -107,8 +107,8 @@ class TrackFormer(BaseFormer):
     def __init__(
             self,
             num_classes: int,
-            num_heads: int=8, 
-            embed_dim: int=256,
+            num_heads: int=4,
+            embed_dim: int=128,
             num_layers: int=6,
             num_ref_points: int=4,
             dim_feedforward: int=512, 

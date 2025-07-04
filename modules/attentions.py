@@ -214,7 +214,7 @@ class DeformableAttention(nn.Module):
             queries: torch.Tensor, 
             ref_points: torch.Tensor,
             value: torch.Tensor, 
-            value_spatial_shapes: torch.LongTensor,
+            value_spatial_shapes: torch.Tensor,
             attention_mask: Optional[torch.Tensor]=None,
             normalize_ref_points: bool=False,
         ) -> torch.Tensor:
@@ -403,7 +403,7 @@ class MultiViewDeformableAttention(DeformableAttention):
             queries: torch.Tensor, 
             ref_points: torch.Tensor,
             value: torch.Tensor, 
-            value_spatial_shapes: torch.LongTensor,
+            value_spatial_shapes: torch.Tensor,
             attention_mask: Optional[torch.Tensor]=None,
             normalize_ref_points: bool=False
         ) -> torch.Tensor:
@@ -480,7 +480,9 @@ class MultiViewDeformableAttention(DeformableAttention):
             self.num_ref_points, 
             self.num_z_ref_points
         )
+        v_hit = None
         if attention_mask is not None:
+            v_hit          = attention_mask.sum(dim=(2, 3, 4))[..., None]
             attention_mask = attention_mask[:, :, :, None, :, None, :]
             if attention_mask.dtype == torch.bool:
                 attn = attn.masked_fill(~attention_mask, value=0)
@@ -553,8 +555,11 @@ class MultiViewDeformableAttention(DeformableAttention):
         output = output.sum(dim=(1, -1)).reshape(batch_size, self.embed_dim, query_len)
         output = output.permute(0, 2, 1)
         output = self.out_fc(output)
-        return output
 
+        if v_hit is not None:
+            output = (1 / v_hit) * output
+
+        return output
 
 class TemporalSelfAttention(DeformableAttention):
     def __init__(
@@ -582,7 +587,7 @@ class TemporalSelfAttention(DeformableAttention):
     def forward(
             self, 
             bev_queries: torch.Tensor,
-            bev_spatial_shape: torch.LongTensor,
+            bev_spatial_shape: torch.Tensor,
             bev_histories: Optional[torch.Tensor]=None,
             transition_matrices: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
@@ -705,10 +710,10 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
 
     def forward(
             self, 
-            bev_queries: torch.Tensor, 
-            bev_spatial_shape: torch.LongTensor,
+            bev_queries: torch.Tensor,
             multiscale_fmaps: torch.Tensor,
-            multiscale_fmap_shapes: torch.LongTensor,
+            bev_spatial_shape: torch.Tensor,
+            multiscale_fmap_shapes: torch.Tensor,
             z_refs: torch.Tensor,
             cam_proj_matrices: torch.Tensor,
         ) -> torch.Tensor:
@@ -717,15 +722,13 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         Input
         --------------------------------
         :bev_queries:    (N, H_bev * W_bev, C_bev) where N = batch_size
-
-        :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
-
+        
         :multiscale_fmaps:  (N, num_views, \sum{i=0}^{L-1} H_i \cdot W_i, C), reshaped and concatenated (along dim=1)
             feature maps from different pyramid levels / scales (L = num_fmap_levels)
 
-        :multiscale_fmap_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
+        :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
 
-        :img_spatial_shape: (1, 2) spatial resolution of image [H, W]
+        :multiscale_fmap_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
 
         :z_refs: (num_z_ref_points, ) z-axis reference points
 
@@ -745,13 +748,72 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         """
         assert multiscale_fmap_shapes.shape[0] == self.num_fmap_levels
         assert z_refs.shape[0] == self.num_z_ref_points
+        assert multiscale_fmaps.shape[1] == self.num_views
 
-        batch_size, *_ = bev_queries.shape
-        num_views      = multiscale_fmaps.shape[1]
+        ref_points, attention_mask = SpatialCrossAttention.generate_sca_ref_points_and_attn_mask(
+            batch_size=bev_queries.shape[0],
+            num_views=self.num_views,
+            grid_xy_res=self.grid_xy_res,
+            bev_spatial_shape=bev_spatial_shape,
+            multiscale_fmap_shapes=multiscale_fmap_shapes,
+            z_refs=z_refs,
+            cam_proj_matrices=cam_proj_matrices,
+            device=bev_queries.device
+        )
+        return super(SpatialCrossAttention, self).forward(
+            queries=bev_queries, 
+            ref_points=ref_points, 
+            value=multiscale_fmaps, 
+            value_spatial_shapes=multiscale_fmap_shapes,
+            attention_mask=attention_mask,
+            normalize_ref_points=False
+        )
+    
+    @staticmethod
+    def generate_sca_ref_points_and_attn_mask(
+            batch_size: int,
+            num_views: int,
+            grid_xy_res: Tuple[float, float],
+            bev_spatial_shape: torch.Tensor,
+            multiscale_fmap_shapes: torch.Tensor,
+            z_refs: torch.Tensor,
+            cam_proj_matrices: torch.Tensor,
+            device: Union[str, int, torch.device]="cpu"
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Input
+        --------------------------------
+        :batch_size: Batch size for attention mask and reference points
+
+        :num_views: Number of spatial views for the attention mask and reference points
+
+        :grid_xy_res: x and y resolution of grid cells in meters (or whatever unit you use)
+
+        :bev_spatial_shape: (1, 2) shape of each spatial feature map [[H_bev, W_bev]]
+
+        :multiscale_fmap_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
+
+        :img_spatial_shape: (1, 2) spatial resolution of image [H, W]
+
+        :z_refs: (num_z_ref_points, ) z-axis reference points
+
+        :cam_proj_matrices: (V, 3, 4) projection matrix for each camera, from real 3D coord (ego vehicle frame) to 3D image
+            coord. This matrix is the product of the 3 x 3 (homogenized to 3 x 4) camera intrinsic matrix and the 4 x 4 camera
+            camera extrinsic-inverse matrix with homogenized coordinates.
+
+        :device: Compute device
+
+        Returns
+        --------------------------------
+        :sca_ref_points: (N, query_len, num_views, L, z_refs, 2) for reference points for 
+            value (multiscale feature maps) eg: [[x0, y0], ...[xn, yn]]
+
+        :sca_attention_mask: For boolean masks, (0 if not to attend to, else 1) if mask is float type 
+            with continuous values it is directly multiplied with the attention weights
+        """
         H_bev, W_bev   = bev_spatial_shape[0]
         H_bev          = H_bev.item()
         W_bev          = W_bev.item()
-        device         = bev_queries.device
 
         # Create BEV 2D grids pace
         # map BEV grid space to real world coordinates: If the BEV grid is a (200 x 200) grid
@@ -762,8 +824,8 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         # represents the center of a grid cell whose bottom  right corner is at (51.2m, 51.2m) in real ego
         # vehicle space. This also means that the x, y center of cell (0, 0) is (-50.944m, -50.944m) and
         # the center for cell (199, 199) is (-50.944m, 50.944m).
-        x_range         = (self.grid_xy_res[0] * W_bev / 2) - (self.grid_xy_res[0] / 2)
-        y_range         = (self.grid_xy_res[1] * H_bev / 2) - (self.grid_xy_res[1] / 2)
+        x_range         = (grid_xy_res[0] * W_bev / 2) - (grid_xy_res[0] / 2)
+        y_range         = (grid_xy_res[1] * H_bev / 2) - (grid_xy_res[1] / 2)
         xindex          = torch.linspace(-x_range, x_range, steps=W_bev, device=device)
         yindex          = torch.linspace(-y_range, y_range, steps=H_bev, device=device)
         ygrid, xgrid    = torch.meshgrid([yindex, xindex], indexing="ij")
@@ -772,7 +834,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
 
         # Create 3D grid space, this phenomenon is called pillaring, this is where we
         # raise the 2D grid space to 3D pillars given some z-axis reference points
-        grid_3d          = torch.zeros(H_bev, W_bev, self.num_z_ref_points, 3, dtype=grid_2d.dtype, device=device)
+        grid_3d          = torch.zeros(H_bev, W_bev, z_refs.shape[0], 3, dtype=grid_2d.dtype, device=device)
         grid_3d[..., :2] = grid_2d[:, :, None, :]
         grid_3d[..., 2]  = z_refs[None, None, :]
 
@@ -781,13 +843,13 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         ones    = torch.ones(*grid_3d.shape[:-1], 1, device=device)
         grid_3d = torch.concat([grid_3d, ones], dim=-1)
 
-        # project from 3D real world coord to 2D image coord (proj_2d shape: (num_views, H_bev, W_bev, num_z_ref_points, 2))
+        # project from 3D real world coord to 2D image coord (proj_2d shape: (num_views, H_bev, W_bev, z_refs.shape[0], 2))
         proj_2d = torch.einsum("vtttki,txyzij->vxyzkj", cam_proj_matrices[:, None, None, None, ...], grid_3d[None, ..., None])
         proj_2d = proj_2d[..., :2, 0]
 
         # We need reference points normalized to be within range (-1, 1), we just need to divide ref_points
         # by (x_range, y_range).
-        ref_points = proj_2d.reshape(num_views, H_bev * W_bev, self.num_z_ref_points, 2).permute(1, 0, 2, 3)
+        ref_points = proj_2d.reshape(num_views, H_bev * W_bev, z_refs.shape[0], 2).permute(1, 0, 2, 3)
         ref_points[..., 0] /= x_range
         ref_points[..., 1] /= y_range
         ref_points = ref_points[None, :, :, None, :, :].tile(batch_size, 1, 1, multiscale_fmap_shapes.shape[0], 1, 1)
@@ -795,14 +857,4 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         # calculate the attention mask
         attention_mask = (ref_points[..., 0] >= -1) & (ref_points[..., 1] <= 1)
 
-        output = super(SpatialCrossAttention, self).forward(
-            queries=bev_queries, 
-            ref_points=ref_points, 
-            value=multiscale_fmaps, 
-            value_spatial_shapes=multiscale_fmap_shapes, 
-            attention_mask=attention_mask,
-            normalize_ref_points=False
-        )
-        v_hit  = attention_mask.sum(dim=(2, 3, 4))[..., None]
-        return (1 / v_hit) * output
-        
+        return ref_points, attention_mask

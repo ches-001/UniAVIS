@@ -123,7 +123,7 @@ class PillarFeatureGenerator(nn.Module):
 
 
 class SimplifiedPointNet(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int=256):
+    def __init__(self, in_dim: int, out_dim: int=128):
         super(SimplifiedPointNet, self).__init__()
 
         self._layer = nn.Sequential(
@@ -152,7 +152,7 @@ class SimplifiedPointNet(nn.Module):
 class PillarFeatureNet(nn.Module):
     def __init__(
             self,
-            out_dim: int=256,
+            out_dim: int=128,
             pillar_wh: Tuple[float, float]=(0.16, 0.16),
             max_points: int=100,
             max_pillars: int=12_000,

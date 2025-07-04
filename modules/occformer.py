@@ -121,9 +121,9 @@ class OccFormerDecoderLayer(nn.Module):
 class OccFormer(BaseFormer):
     def __init__(
             self, 
-            num_heads: int, 
-            embed_dim: int,
             max_num_agents: int,
+            num_heads: int=4,
+            embed_dim: int=128,
             num_modes: int=6,
             num_ref_points: int=4,
             pred_horizon: int=5,

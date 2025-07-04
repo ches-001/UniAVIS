@@ -88,8 +88,8 @@ class PlanFormer(BaseFormer):
     def __init__(
             self,
             num_commands: int,
-            num_heads: int=8, 
-            embed_dim: int=256,
+            num_heads: int=4,
+            embed_dim: int=128,
             num_layers: int=3,
             num_modes: int=6,
             num_ref_points: int=4,

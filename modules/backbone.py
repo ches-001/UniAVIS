@@ -8,7 +8,7 @@ class ResNetBackBone(resnet.ResNet):
     def __init__(
         self, 
         in_channels: int, 
-        out_channels: int,
+        out_channels: int=128,
         block: Union[str, Type]=resnet.BasicBlock, 
         block_layers: Optional[Tuple[int, int, int, int]]=None
     ):
