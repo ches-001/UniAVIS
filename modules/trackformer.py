@@ -117,7 +117,6 @@ class TrackFormer(BaseFormer):
             max_detections: int=900,
             learnable_pe: bool=True,
             bev_feature_hw: Tuple[int, int]=(200, 200),
-            det_3d: bool=True
         ):
         super(TrackFormer, self).__init__()
 
@@ -132,7 +131,6 @@ class TrackFormer(BaseFormer):
         self.max_detections  = max_detections
         self.learnable_pe    = learnable_pe
         self.bev_feature_hw  = bev_feature_hw
-        self.det_3d          = det_3d
 
         self.detection_pos_emb  = PosEmbedding1D(
             self.max_detections, 
@@ -148,7 +146,6 @@ class TrackFormer(BaseFormer):
         self.detection_module   = DetectionHead(
             embed_dim=self.embed_dim, 
             num_classes=self.num_classes, 
-            det_3d=self.det_3d,
         )
 
     def _create_decoder_layers(self) -> nn.ModuleList:
@@ -184,6 +181,13 @@ class TrackFormer(BaseFormer):
         :queries: (N, num_queries, embed_dim) batch of output context query for each segmented item (including invalid detections).
 
         :detections: (N, num_queries, det_params) | (N, num_queries, det_params) tensor contains 2d or 3d box detections
+
+        :ego_data: Dict of tensors as follows:
+
+        ---------------------------------
+            ego_query     (N, embed_dim)
+            
+            mode_scores   (N, det_params)
         """
         assert bev_features.shape[-1] == self.embed_dim
 

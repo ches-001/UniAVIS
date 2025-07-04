@@ -338,16 +338,10 @@ class SpatialSinusoidalPosEmbedding(nn.Module):
     
 
 class DetectionHead(nn.Module):
-    def __init__(
-            self, 
-            embed_dim: int, 
-            num_classes: int, 
-            det_3d: bool=True, 
-        ):
+    def __init__(self, embed_dim: int, num_classes: int):
         super(DetectionHead, self).__init__()
         self.embed_dim       = embed_dim
         self.num_classes     = num_classes
-        self.det_3d          = det_3d
 
         self.inception_module = nn.Sequential(
             nn.Linear(self.embed_dim, self.embed_dim),
@@ -367,10 +361,8 @@ class DetectionHead(nn.Module):
 
         Returns
         --------------------------------
-        :output: (N, max_objs, det_params) (det_params = num_classes + (7 or 5)). For detections = num_classes + 8, 
-            we have: [center_x, center_y, center_z, length, width, height, heading_angle, [classes]].
-            For det_params = num_classes + 6, we have [center_x, center_y, length, width, heading_angle, [[classes]]]
-
+        :output: (N, max_objs, det_params) (det_params = num_classes + 7), 
+            we have: [center_x, center_y, center_z, length, width, height, heading_angle, [classes]]
         """
         out    = self.inception_module(x)
         loc    = self.loc_module(out)

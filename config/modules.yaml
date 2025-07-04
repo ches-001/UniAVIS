@@ -53,7 +53,6 @@ trackformer:
   max_detections: *max_num_agents
   learnable_pe: True
   bev_feature_hw: *bev_feature_hw
-  det_3d: True
 
 vectormapformer:
   num_heads: 8
@@ -81,7 +80,6 @@ rastermapformer:
   max_detections: *max_num_map_elements
   learnable_pe: True
   bev_feature_hw: *bev_feature_hw
-  det_3d: True
   num_seg_coeffs: 32
   seg_c_h: 256
 

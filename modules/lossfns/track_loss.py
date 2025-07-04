@@ -25,21 +25,47 @@ class TrackLoss(nn.Module):
         self.l1_lambda = l1_lambda
         self.angle_lambda = angle_lambda
 
+
     def forward(
             self, 
             preds: torch.Tensor, 
-            targets: torch.Tensor, 
+            targets: torch.Tensor,
+            ego_preds: Optional[torch.Tensor]=None,
+            ego_targets: Optional[torch.Tensor]=None,
             prev_track_ids: Optional[torch.Tensor]=None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         preds:          (N, num_dets, d)
         targets:        (N, num_dets, d)
+        ego_preds:      (N, d)
+        ego_preds:      (N, d)
         prev_track_ids: (N, num_dets)
         """
         if prev_track_ids is None:
-            return self._first_frame_forward(preds, targets)
-        return self._next_frame_forward(preds, targets, prev_track_ids)
-        
+            loss = self._first_frame_forward(preds, targets)
+        else:
+            loss = self._next_frame_forward(preds, targets, prev_track_ids)
+
+        if ego_preds is not None and ego_targets is not None:
+            ego_ciou_loss, ego_l1_box_loss = self._box_ciou_and_l1_loss(
+                preds[:, 1:7], targets[:, 1:-2], is_3d=True
+            )
+            ego_angle_loss = self._angle_loss(ego_preds[:, 6], ego_targets[:, 7])
+            ego_cls_loss = self._cls_loss(
+                ego_preds[:, 7:],
+                ego_targets[:, 8].long(),
+                torch.arange(ego_targets.shape[0], device=ego_targets.device)
+            )
+            ego_loss = (
+                (self.cls_lambda * ego_cls_loss.mean()) +
+                (self.iou_lambda * ego_ciou_loss.mean()) + 
+                (self.l1_lambda * ego_l1_box_loss.mean()) + 
+                (self.angle_lambda * ego_angle_loss.mean())
+            )
+            loss = loss + (ego_loss / (preds.shape[0] * preds.shape[1]))
+
+        return loss
+
 
     def _first_frame_forward(
             self, 
@@ -51,22 +77,11 @@ class TrackLoss(nn.Module):
 
         assert preds.shape[:2] == targets.shape[:2]
 
-        if targets.shape[-1] == 5:
-            ciou_cost_mat, l1_box_cost_mat = self._box_ciou_and_l1_loss(
-                preds[:, :, None, 1:5], targets[:, None, :, 1:-2], is_3d=False
-            )
-            pred_angle_idx, pred_cls_start_idx = 4, 5
-            target_angle_idx, target_cls_idx = 5, 6
-
-        elif targets.shape[-1] == 8:
-            ciou_cost_mat, l1_box_cost_mat = self._box_ciou_and_l1_loss(
-                preds[:, :, None, 1:7], targets[:, None, :, 1:-2], is_3d=True
-            )
-            pred_angle_idx, pred_cls_start_idx = 6, 7
-            target_angle_idx, target_cls_idx = 7, 8
-
-        else:
-            raise ValueError
+        ciou_cost_mat, l1_box_cost_mat = self._box_ciou_and_l1_loss(
+            preds[:, :, None, 0:6], targets[:, None, :, 1:-2], is_3d=True
+        )
+        pred_angle_idx, pred_cls_start_idx = 6, 7
+        target_angle_idx, target_cls_idx = 7, 8
 
         batch_indexes = torch.arange(targets.shape[0], device=device)[:, None].tile(1, targets.shape[1])
 
@@ -131,24 +146,12 @@ class TrackLoss(nn.Module):
         
 
         assert preds.shape[:2] == targets.shape[:2]
-        
-        if targets.shape[-1] == 5:
-            is_3d = False
-            pred_box_start, pred_box_end = 0, 4
-            target_box_start, target_box_end = 1, -2
-            pred_angle_idx, pred_cls_start_idx = 4, 5
-            target_angle_idx, target_cls_idx = 5, 6
 
-        elif targets.shape[-1] == 8:
-            is_3d = True
-            pred_box_start, pred_box_end = 0, 6
-            target_box_start, target_box_end = 1, -2
-            pred_angle_idx, pred_cls_start_idx = 6, 7
-            target_angle_idx, target_cls_idx = 7, 8
+        pred_box_start, pred_box_end = 0, 6
+        target_box_start, target_box_end = 1, -2
+        pred_angle_idx, pred_cls_start_idx = 6, 7
+        target_angle_idx, target_cls_idx = 7, 8
 
-        else:
-            raise ValueError
-        
         device = preds.device
         num_cls = preds.shape[-1] - pred_cls_start_idx
         bg_cls_idx = num_cls - 1
@@ -183,7 +186,7 @@ class TrackLoss(nn.Module):
 
             mp_angle_loss = self._angle_loss(mp_preds[..., pred_angle_idx], mp_targets[..., target_angle_idx])
             mp_ciou_loss, mp_l1_box_loss = self._box_ciou_and_l1_loss(
-                mp_preds[..., pred_box_start:pred_box_end], mp_targets[..., target_box_start:target_box_end], is_3d
+                mp_preds[..., pred_box_start:pred_box_end], mp_targets[..., target_box_start:target_box_end], True
             )
             mp_pred_cls = mp_preds[..., pred_cls_start_idx:]
             mp_target_cls = mp_targets[..., target_cls_idx].long()

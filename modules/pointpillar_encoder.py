@@ -123,7 +123,7 @@ class PillarFeatureGenerator(nn.Module):
 
 
 class SimplifiedPointNet(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int=256,):
+    def __init__(self, in_dim: int, out_dim: int=256):
         super(SimplifiedPointNet, self).__init__()
 
         self._layer = nn.Sequential(

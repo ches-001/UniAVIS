@@ -29,6 +29,9 @@ class MotionLoss(nn.Module):
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
             target_motion: torch.Tensor,
+            ego_pred_motion_modes: Optional[torch.Tensor]=None,
+            ego_pred_mode_proba: Optional[torch.Tensor]=None,
+            ego_target_motion: Optional[torch.Tensor]=None,
             agent2scene_transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
@@ -38,6 +41,12 @@ class MotionLoss(nn.Module):
 
         target_motion: (N, num_agents, T, 2), this motion data is in scene (ego) level
 
+        ego_pred_motion_modes: (N, k, T, 5), ego motion predictions
+
+        ego_pred_mode_proba: (N, k), ego motion predictions
+
+        ego_target_motion: (N, T, 2), ego target motion
+
         agent2scene_transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
             if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
         """
@@ -46,6 +55,21 @@ class MotionLoss(nn.Module):
                 agent2scene_transform.shape[-1] == 3 and
                 agent2scene_transform.shape[-2] == agent2scene_transform.shape[-1]
             )
+
+        if (
+            ego_pred_motion_modes is not None
+            and ego_pred_mode_proba is not None
+            and ego_target_motion is not None
+        ):
+            pred_motion_modes = torch.concat([ego_pred_mode_proba[:, None], pred_motion_modes], dim=1)
+            pred_mode_proba = torch.concat([ego_pred_mode_proba[:, None], pred_mode_proba], dim=1)
+            target_motion = torch.concat([ego_target_motion[:, None], target_motion], axis=1)
+
+            if agent2scene_transform is not None:
+                ego_transform = torch.eye(agent2scene_transform.shape[-1])[None, None, :, :]
+                ego_transform = ego_transform.tile(agent2scene_transform.shape[0], 1, 1, 1)
+                agent2scene_transform = torch.concat([ego_transform, agent2scene_transform], axis=1)
+        
         if self.as_gmm:
             if self.collapsed_gmm:
                 return self._collapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)

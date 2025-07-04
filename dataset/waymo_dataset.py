@@ -30,6 +30,7 @@ class WaymoDataset(Dataset):
             planning_horizon: int=6,
             bev_map_hw: Tuple[int, int]=(200, 200),
             cam_img_hw: Tuple[int, int]=(480, 640),
+            ego_vehicle_dims: Tuple[float, float, float]=(5.182, 2.032, 1.778),
             num_cloud_points: int=100_000,
             xyz_range: Optional[List[Tuple[float, float]]]=None,
             frames_per_sample: int=4,
@@ -57,6 +58,7 @@ class WaymoDataset(Dataset):
         self.planning_horizon = planning_horizon
         self.bev_map_hw = bev_map_hw
         self.cam_img_hw = cam_img_hw
+        self.ego_vehicle_dims = ego_vehicle_dims
         self.num_cloud_points = num_cloud_points
         self.xyz_range = xyz_range or [(-51.2, 51.2), (-51.2, 51.2), (-5.0, 3.0)]
         self.frames_per_sample = frames_per_sample
@@ -339,7 +341,7 @@ class WaymoDataset(Dataset):
     def _load_laser_labels(self, frame_dict: Dict[str, Any], obj_id_map: Dict[str, int]) -> torch.Tensor:
         laser_labels_path = frame_dict["laser_labels_path"]
         laser_labels_list = load_pickle_file(laser_labels_path)
-        obj_3d_dets = []
+        detections = []
 
         for obj_idx in range(0, len(laser_labels_list)):
             obj_3d_bbox = laser_labels_list[obj_idx]["box"]
@@ -353,7 +355,7 @@ class WaymoDataset(Dataset):
             if obj_id not in obj_id_map:
                 obj_id_map[obj_id] = len(obj_id_map)
 
-            obj_3d_dets.append([
+            detections.append([
                 obj_id_map[obj_id],
                 obj_3d_bbox["center_x"],
                 obj_3d_bbox["center_y"],
@@ -364,9 +366,14 @@ class WaymoDataset(Dataset):
                 obj_3d_bbox["heading"],
                 laser_labels_list[obj_idx]["type"]
             ])
-        obj_3d_dets = torch.tensor(obj_3d_dets, dtype=torch.float32)
-        # shape: (num_detections, 9)
-        return obj_3d_dets
+        # shape: (1 + num_detections, 9)
+        detections = torch.tensor(detections, dtype=torch.float32)
+        vehicle_label = self.metadata["LABELS"]["DETECTION_LABEL_INDEXES"]["VEHICLE"]
+        ego_detections = torch.tensor(
+            [-1, *([0.0]*3), *self.ego_vehicle_dims, 0.0, vehicle_label], dtype=torch.float32
+        )
+        detections = torch.concat([ego_detections[None, :], detections], dim=0)
+        return detections
 
     
     @check_perf

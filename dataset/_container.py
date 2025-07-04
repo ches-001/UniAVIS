@@ -27,9 +27,9 @@ class FrameData(DeviceChangeMixin):
         for reflectance / intensity r.
 
     laser_detections: This tensor contains objects / agents detected with the LIDAR sensors as 3D bounding boxes mapped
-        to the ego vehicle frame. The tensor is of shape [Nd_lidar, 9], where Nd_lidar is the number of unique objects
-        detected across the LIDAR sensors, and each index of the second dimension corresponds to:
-        [track_id, center_x, center_y, center_z, length, width, height, heading_angle(rad), object_type]
+        to the ego vehicle frame. The tensor is of shape [1 + Nd_lidar, 9], where the first detection pertains to the ego vehicle
+        and Nd_lidar is the number of unique objects detected across the LIDAR sensors, and each index of the second dimension 
+        corresponds to: [track_id, center_x, center_y, center_z, length, width, height, heading_angle(rad), object_type]
 
     ego_pose: A [4, 4] transformation matrix to rotate relative coordinates of global frame to ego vehicle frame
 
