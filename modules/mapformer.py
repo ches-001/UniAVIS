@@ -476,7 +476,7 @@ class RasterMapFormer(TrackFormer):
             num_classes=self.num_classes, 
             num_coefs=self.num_seg_coeffs
         )
-        del self.det_3d, self.ego_query_emb
+        del self.ego_query_emb
 
     def forward(self, bev_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """

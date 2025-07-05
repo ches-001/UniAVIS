@@ -2,7 +2,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import *
+from typing import Optional, Tuple, Union
+from utils.img_utils import transform_points
 try:
     from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttnFunction \
         as _MMCVDeformableAttentionFunction
@@ -601,7 +602,7 @@ class TemporalSelfAttention(DeformableAttention):
 
         :bev_histories: (N, H_bev * W_bev, C_bev) BEV features from the previous timestep t-1
 
-        :transition_matrices: (N, 3, 3) the matrix that transitions the ego vehicle from t-1 to t 
+        :transition_matrices: (N, 4, 4) the matrix that transitions the ego vehicle from t-1 to t 
                               (in homogeneous coordinates)
                               
         Returns
@@ -687,10 +688,15 @@ class TemporalSelfAttention(DeformableAttention):
         yindex               = torch.linspace(-y_range, y_range, steps=H_bev, device=device)
         ygrid, xgrid         = torch.meshgrid([yindex, xindex], indexing="ij")
         bev_grid_2d          = torch.stack([xgrid, ygrid], dim=-1).to(dtype=torch.float32, device=device)
-        ones                 = torch.ones(*bev_grid_2d.shape[:-1], 1, dtype=bev_grid_2d.dtype, device=device)
-        bev_grid_3d          = torch.concat([bev_grid_2d, ones], dim=-1)[None].tile(batch_size, 1, 1, 1)
-        aligned_grid         = torch.einsum("nttii,nhwik->nhwik", transition_matrices[:, None, None], bev_grid_3d[..., None])
-        aligned_grid         = aligned_grid[..., :2, 0]
+
+        # bev_grid_2d: (H_bev, W_bev, 2) -> (1, H_bev, W_bev, 1, 2)
+        # transition_matrices: (N, 4, 4) -> (N, 1, 1, 4, 4)
+        # aligned_grid: (N, H_bev, W_bev, 2)
+        bev_grid_2d         = bev_grid_2d[None, ..., None, :]
+        transition_matrices = transition_matrices[:, None, None, :, :]
+        aligned_grid        = transform_points(bev_grid_2d, transform_matrix=transition_matrices)
+        aligned_grid        = aligned_grid[..., 0, :]
+
         aligned_grid[..., 0] /= x_range
         aligned_grid[..., 1] /= y_range
         bev_histories        = bev_histories.permute(0, 2, 1).reshape(batch_size, C_bev, H_bev, W_bev)
@@ -825,8 +831,8 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         grid_2d         = torch.stack([xgrid, ygrid], dim=-1)
         grid_2d         = grid_2d.to(dtype=torch.float32, device=device)
 
-        # Create 3D grid space, this phenomenon is called pillaring, this is where we
-        # raise the 2D grid space to 3D pillars given some z-axis reference points
+        # Create 3D grid space, this is called pillaring, it's where we
+        # raise the 2D grid space by reference points along the z-axis to make 3D pillars
         grid_3d          = torch.zeros(H_bev, W_bev, z_refs.shape[0], 3, dtype=grid_2d.dtype, device=device)
         grid_3d[..., :2] = grid_2d[:, :, None, :]
         grid_3d[..., 2]  = z_refs[None, None, :]
@@ -836,9 +842,13 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         ones    = torch.ones(*grid_3d.shape[:-1], 1, device=device)
         grid_3d = torch.concat([grid_3d, ones], dim=-1)
 
-        # project from 3D real world coord to 2D image coord (proj_2d shape: (num_views, H_bev, W_bev, z_refs.shape[0], 2))
-        proj_2d = torch.einsum("vtttki,txyzij->vxyzkj", cam_proj_matrices[:, None, None, None, ...], grid_3d[None, ..., None])
-        proj_2d = proj_2d[..., :2, 0]
+        # cam_proj_matrices: (V, 3, 4) -> (V, 1, 1, 1, 3, 4)
+        # grid_3d:  (H_bev, W_bev, 4, 3)   -> (1, H_bev, W_bev, nz, 1, 3)
+        # proj_2d: (V, H_bev, W_bev, nz, 2)
+        cam_proj_matrices = cam_proj_matrices[:, None, None, None, :, :]
+        grid_3d           = grid_3d[None, :, :, :, None, :]
+        proj_2d           = transform_points(grid_3d, transform_matrix=cam_proj_matrices)
+        proj_2d           = proj_2d[..., 0, :2]
 
         # We need reference points normalized to be within range (-1, 1), we just need to divide ref_points
         # by (x_range, y_range).
@@ -847,7 +857,6 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         ref_points[..., 1] /= y_range
         ref_points = ref_points[None, :, :, None, :, :].tile(batch_size, 1, 1, multiscale_fmap_shapes.shape[0], 1, 1)
 
-        # calculate the attention mask
         attention_mask = (ref_points[..., 0] >= -1) & (ref_points[..., 1] <= 1)
 
         return ref_points, attention_mask

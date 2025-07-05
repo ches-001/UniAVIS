@@ -3,6 +3,7 @@ import torch.nn as nn
 from .base import BaseFormer
 from .common import AddNorm, PosEmbedding1D, PosEmbedding2D, SpatialSinusoidalPosEmbedding, SimpleMLP
 from .attentions import MultiHeadedAttention, DeformableAttention
+from utils.img_utils import transform_points
 from typing import Tuple, Dict, Optional
 
 
@@ -235,7 +236,7 @@ class MotionFormer(BaseFormer):
             ego_query: torch.Tensor,
             agent_queries: torch.Tensor,
             map_queries: torch.Tensor,
-            proj_matrix: torch.Tensor,
+            transform_matrices: torch.Tensor,
             agent_pad_mask: Optional[torch.Tensor]=None,
             map_pad_mask: Optional[torch.Tensor]=None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
@@ -252,15 +253,15 @@ class MotionFormer(BaseFormer):
         :ego_query: (N, embed_dim), ego vehicle queries from the TrackFormer
 
         :agent_queries: (N, num_agents, embed_dim) Agent queries from the TrackFormer network 
-                        (num_agents = max number of agents)
+            (num_agents = max number of agents)
 
         :map_queries: (N, num_map_elements, embed_dim) Map queries from the MapFormer network 
-                    (num_map_elements = max number of mapped areas)
+            (num_map_elements = max number of mapped areas)
 
-        :proj_matrix: (N, num_agents, 3, 3) projection (2D rotation and translation combined) matrix that projects 
-                      each agent from agent-level coordinates to scene-level coordinates (in homogeneous coordinates)
-                      NOTE: Scene level coordinate in this case refers to coordinates of ego-vehicle, as in the BEV
-                      scene, The ego vehicle center is the reference point
+        :transform_matrices: (N, num_agents, 4, 4) transformation (2D rotation and translation combined) matrix that 
+            transforms each agent from agent-level coordinates to scene-level coordinates (in homogeneous coordinates)
+            NOTE: Scene level coordinate in this case refers to coordinates of ego-vehicle, as in the BEV
+            scene, The ego vehicle center is the reference point
         
         :agent_pad_mask: (N, num_agents), bool padding mask for invalid agent queries (0 if pad value, else 1):
 
@@ -285,22 +286,22 @@ class MotionFormer(BaseFormer):
             
             mode_scores   (N, k)
         """
+        assert transform_matrices.shape[-1] == 4
+        assert transform_matrices.shape[-2] == transform_matrices.shape[-1]
+        
         batch_size = bev_features.shape[0]
         k          = agent_anchors.shape[0]
         device     = bev_features.device
 
         # include ego vehicle related data (including ego query) to the rest of the queries
-        agent_current_pos = torch.concat([
-            torch.zeros_like(agent_current_pos[:, [0], :]), agent_current_pos
-        ], dim=1)
+        ego_current_pos    = torch.zeros_like(agent_current_pos[:, [0], :])
+        agent_current_pos  = torch.concat([ego_current_pos, agent_current_pos], dim=1)
 
-        agent_queries     = torch.concat([
-            ego_query[:, None, :], agent_queries
-        ], dim=1)
+        agent_queries      = torch.concat([ego_query[:, None, :], agent_queries], dim=1)
 
-        proj_matrix       = torch.concat([
-            proj_matrix, torch.eye(3)[None, None, :, :].tile(batch_size, 1, 1, 1)
-        ], dim=1)
+        ego_transform      = torch.eye(transform_matrices.shape[-1], device=device)
+        ego_transform      = ego_transform[None, None, :, :].tile(batch_size, 1, 1, 1)
+        transform_matrices = torch.concat([transform_matrices, ego_transform], dim=1)
 
         if agent_pad_mask is not None:
             agent_pad_mask = torch.concat([
@@ -320,34 +321,28 @@ class MotionFormer(BaseFormer):
         
         # scene level anchors:
         # I^s = R_i \cdot I^a + T_i, where R_i and T_i are agent specific rotation and translation matrices used for
-        # projecting from agent level coordinates to scene level coordinates. In this implementation, the rotation (2x2)
-        # and translation (2x1) matrices are combined to make a 3x3 projection matrix P_i, and the agent level anchors 
+        # transforming from agent level coordinates to scene level coordinates. In this implementation, the rotation (2x2)
+        # and translation (2x1) matrices are combined to make a 4 x 4 transformation matrix P_i, and the agent level anchors 
         # are converted to homogeneous coordinates so that I^s = P_i \cdot I^a, Where I^a = agent level anchors and 
         # I^s = scene level anchors
         # NOTE: here, we only really need the last timestep of the agent level anchors and the scene level anchors.
         # agent_anchors shape: (1, k, 1, 2)
         # scene_anchors shape: (N, k, num_agents, 2)
-        proj_matrix   = proj_matrix[:, None, ...]
-        agent_anchors = agent_anchors[None, :, None, :]
-        scene_anchors = torch.concat([agent_anchors, torch.ones_like(agent_anchors[..., [0]])], dim=-1)
-        scene_anchors = torch.einsum("noaii,okoio->nkaio", proj_matrix, scene_anchors[..., None])
-        scene_anchors = scene_anchors[..., :2, 0]
+        transform_matrices = transform_matrices[:, None]
+        agent_anchors      = agent_anchors[None, :, None, None, :]
+        scene_anchors      = transform_points(agent_anchors, transform_matrix=transform_matrices)
+        agent_anchors      = agent_anchors[..., 0, :]
+        scene_anchors      = scene_anchors[..., 0, :]
 
-        # initialize the agent goal position to the last timestep of the scene level anchor for the first decoder
-        # layer and expand the dimensions of the agent_current_pos to (N, num_agents, 1, 2) to match the rest
-        agent_goal_pos        = scene_anchors
         agent_current_pos     = agent_current_pos[:, None, ...]
-        
         agent_anchors_emb     = self.agent_anchor_fc(self.spatial_pos_emb(agent_anchors))
         scene_anchors_emb     = self.scene_anchor_fc(self.spatial_pos_emb(scene_anchors))
         agent_current_pos_emb = self.current_pos_fc(self.spatial_pos_emb(agent_current_pos))
-        agent_goal_pos_emb    = self.goal_pos_fc(self.spatial_pos_emb(agent_goal_pos))
+        agent_goal_pos_emb    = self.goal_pos_fc(self.spatial_pos_emb(scene_anchors))
         query_pos_emb         = agent_anchors_emb + scene_anchors_emb + agent_current_pos_emb + agent_goal_pos_emb
 
         ctx_queries           = self.ctx_query_emb(None, agent_pos_indexes[:, 0, :]).permute(0, 2, 3, 1)
         queries               = ctx_queries + query_pos_emb
-
-        ones                  = torch.ones_like(agent_goal_pos[..., [0]])
         grid_xy_res           = torch.tensor(self.grid_xy_res, device=device)
         bev_wh                = torch.tensor([self.bev_feature_hw[1], self.bev_feature_hw[0]], device=device)
         min_real_xy           = (-bev_wh / 2) * grid_xy_res
@@ -365,11 +360,13 @@ class MotionFormer(BaseFormer):
         if map_pad_mask is not None:
             agent_map_attn_mask = agent_pad_mask[..., None] & map_pad_mask[..., None, :]
         
+        agent_goal_pos = scene_anchors[..., None, :]
+
         for i in range(0, self.num_layers):
             # reference points are computed from the agent goal position (final point in trajectory prediction).
             # The reference points are first converted to scene level frame since they are originally in agent
             # level frame and we need it to correspond to the BEV grid.
-            ref_points  = 2 * ((agent_goal_pos[..., None, :] - min_real_xy) / (max_real_xy - min_real_xy)) - 1
+            ref_points  = 2 * ((agent_goal_pos - min_real_xy) / (max_real_xy - min_real_xy)) - 1
 
             ctx_queries = self.decoder_modules[i](
                 bev_features=bev_features,
@@ -392,11 +389,9 @@ class MotionFormer(BaseFormer):
             # we compute the trajectory via a cummulative sum operation over the timestep axis.
             xy_traj            = torch.cumsum(mode_traj[..., :2], dim=3)
             mode_traj          = torch.concat([xy_traj, mode_traj[..., 2:4], torch.tanh(mode_traj[..., 4:])], dim=-1)
-            agent_goal_pos     = mode_traj[..., -1, :2]
-            agent_goal_pos     = torch.concat([agent_goal_pos, ones], dim=-1)
-            agent_goal_pos     = torch.einsum("noaii,nkaio->nkaio", proj_matrix, agent_goal_pos[..., None])
-            agent_goal_pos     = agent_goal_pos[..., :2, 0]
-            agent_goal_pos_emb = self.goal_pos_fc(self.spatial_pos_emb(agent_goal_pos))
+            agent_goal_pos     = mode_traj[..., [-1], :2]
+            agent_goal_pos     = transform_points(agent_goal_pos, transform_matrix=transform_matrices)
+            agent_goal_pos_emb = self.goal_pos_fc(self.spatial_pos_emb(agent_goal_pos[..., 0, :]))
             query_pos_emb      = agent_anchors_emb + scene_anchors_emb + agent_current_pos_emb + agent_goal_pos_emb
             queries            = ctx_queries + query_pos_emb
 

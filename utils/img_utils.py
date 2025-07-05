@@ -209,8 +209,8 @@ def rotate_points(points: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
     """
     Rotate a 2D point or rotate a 3D point about the z-axis.
 
-    points: (N, num_objects, 2 | 3)  expects either 2D or 3D points
-    angle: (N, num_objects | 1) heading / rotation angle in radiance
+    points: (N, ..., 2 | 3)  expects either 2D or 3D points
+    angle: (N, ...) heading / rotation angle in radiance
     """
     assert points.shape[-1] == 2 or points.shape[-1] == 3
     
@@ -227,19 +227,17 @@ def rotate_points(points: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
         rotation_matrix = torch.stack([angle_cos, angle_sin, zeros, -angle_sin, angle_cos, zeros, zeros, zeros, ones], dim=-1)
         rotation_matrix = torch.unflatten(rotation_matrix, dim=-1, sizes=(3, 3))
 
-    return torch.matmul(points[..., None, :], rotation_matrix.permute(0, 1, 3, 2))[..., 0, :]
+    return torch.matmul(points, rotation_matrix.transpose(-1, -2))[..., :]
 
 
 def translate_points(points: torch.Tensor, ref_point: torch.Tensor) -> torch.Tensor:
     """
     Translate a point to the frame of a reference point.
     
-    points: (N, num_objects, 2 | 3)  expects either 2D or 3D points
-    ref_point: (N, 1, 2 | 3)  expects either 2D or 3D points
+    points: (N, ..., d)  expects either 2D or 3D points
+    ref_point: (N, ..., d)  expects either 2D or 3D points
     """
     assert points.shape[-1] == ref_point.shape[-1]
-    if ref_point.ndim == 2:
-        ref_point = ref_point[:, None, :]
     return points - ref_point
 
 
@@ -253,21 +251,38 @@ def transform_points(
     """
     Apply rotation and then translation.
 
-    points: (N, 1 | num_objects, 2 | 3)  expects either 2D or 3D points
-    angle: (N, num_objects | 1) heading / rotation angle in radiance
-    ref_point: (N, 1 | num_objects, 2 | 3)  expects either 2D or 3D points
-    transform_matrix: (N, 1 | num_objects, 2, 2) | (N, 1 | num_objects, 3, 3)
+    points: (N, ..., d)  expects either 2D or 3D points
+    angle: (N, ...) heading / rotation angle in radiance
+    ref_point: (N, ..., d)  expects either 2D or 3D points
+    transform_matrix: (N, ..., d, d)
     """
-    if ref_points is not None and angles is not None:
-        return translate_points(rotate_points(points, angles), ref_points)
-    
-    elif transform_matrix is not None:
-        return torch.matmul(points[..., None, :], transform_matrix.permute(0, 1, 3, 2))[..., 0, :]
+    if angles is not None:
+        points = rotate_points(points, angles)
 
-    else:
-        raise ValueError(
-            "expects angle and ref_points for rotation and translation respectively, or transform_matrix for transformation"
-        )
+    if ref_points is not None:
+        points = translate_points(points, ref_points)
+    
+    if transform_matrix is not None:
+        assert transform_matrix.shape[-1] in [2, 3, 4]
+
+        d = points.shape[-1]
+        if d == transform_matrix.shape[-1]:
+            points = torch.matmul(points, transform_matrix.transpose(-1, -2))[..., :]
+        
+        elif transform_matrix.shape[-1] - d == 1:
+            points = torch.concat([points, torch.ones_like(points[..., [0]])], dim=-1)
+            points = torch.matmul(points, transform_matrix.transpose(-1, -2))[..., :d]
+        
+        elif transform_matrix.shape[-1] - d == 2:
+            matmul_pad = torch.ones_like(points[..., :2])
+            matmul_pad[..., 0] = 0
+            points = torch.concat([points, matmul_pad], dim=-1)
+            points = torch.matmul(points, transform_matrix.transpose(-1, -2))[..., :d]
+        
+        else:
+            raise ValueError(f"points ({points.shape}) and transform_matrix ({transform_matrix.shape}) have incompatible shapes")
+
+    return points
     
 
 def overlap_img_masks(masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

@@ -175,9 +175,7 @@ class WaymoDataset(Dataset):
         cam_views = self._load_cam_views(frame_dict)
         point_cloud = self._load_point_cloud(frame_dict)
         laser_detections = self._load_laser_labels(frame_dict, obj_id_map=obj_id_map)
-        ego_pose, cam_intrinsic, cam_extrinsic = self._load_ego_pose_and_transforms(
-            frame_dict, only_pose=is_partial_data
-        )            
+        ego_pose, cam_intrinsic, cam_extrinsic = self._load_ego_pose_and_transforms(frame_dict)            
 
         motion_tracks = None
         occupancy_map = None
@@ -377,12 +375,12 @@ class WaymoDataset(Dataset):
 
     
     @check_perf
-    def _load_ego_pose_and_transforms(self, frame_dict: Dict[str, Any], only_pose: bool=False) -> Tuple[
-        torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-    ]:
+    def _load_ego_pose_and_transforms(
+        self, 
+        frame_dict: Dict[str, Any]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
         ego_pose = torch.from_numpy(frame_dict["ego_pose"])
-        if only_pose:
-            return ego_pose, None, None
         cam_intrinsic_dict = frame_dict["camera_proj_matrix"]["intrinsic"]
         cam_extrinsic_dict = frame_dict["camera_proj_matrix"]["extrinsic"]
         cam_keys = sorted(list(cam_intrinsic_dict.keys()))
@@ -395,7 +393,12 @@ class WaymoDataset(Dataset):
 
         cam_intrinsic = torch.from_numpy(np.stack(cam_intrinsic, axis=0))
         cam_extrinsic = torch.from_numpy(np.stack(cam_extrinsic, axis=0))
+
         # shape: (4, 4), (3, 3), (4, 4), (4, 4) respectively
+        ego_pose = ego_pose.to(torch.float32)
+        cam_intrinsic = cam_intrinsic.to(torch.float32)
+        cam_extrinsic = cam_extrinsic.to(torch.float32)
+        
         return ego_pose, cam_intrinsic, cam_extrinsic
 
 
@@ -484,7 +487,7 @@ class WaymoDataset(Dataset):
 
         global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)
-        global_positions = torch.from_numpy(global_positions)
+        global_positions = torch.from_numpy(global_positions).to(ego_pose.dtype)
         ego_trajectory = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
         # shape: (timesteps, 2)
         return ego_trajectory[:, :2].to(dtype=torch.float32)

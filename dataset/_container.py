@@ -90,8 +90,8 @@ class MultiFrameData(FrameData):
             point_cloud = [],
             laser_detections = [],
             ego_pose = [],
-            cam_intrinsic = frames[-1].cam_intrinsic,
-            cam_extrinsic = frames[-1].cam_extrinsic,
+            cam_intrinsic = [],
+            cam_extrinsic = [],
             motion_tracks = frames[-1].motion_tracks,
             occupancy_map = frames[-1].occupancy_map,
             map_elements_polylines = frames[-1].map_elements_polylines,
@@ -105,12 +105,16 @@ class MultiFrameData(FrameData):
             sample_dict["cam_views"].append(frame.cam_views)
             sample_dict["point_cloud"].append(frame.point_cloud)
             sample_dict["ego_pose"].append(frame.ego_pose)
+            sample_dict["cam_intrinsic"].append(frame.cam_intrinsic)
+            sample_dict["cam_extrinsic"].append(frame.cam_extrinsic)
             sample_dict["laser_detections"].append(frame.laser_detections)
         
         sample_dict["cam_views"] = torch.stack(sample_dict["cam_views"], dim=0)
         sample_dict["point_cloud"] = torch.stack(sample_dict['point_cloud'], dim=0)
-        sample_dict["laser_detections"] = torch.stack(sample_dict["laser_detections"], dim=0)
         sample_dict["ego_pose"] = torch.stack(sample_dict["ego_pose"], dim=0)
+        sample_dict["cam_intrinsic"] = torch.stack(sample_dict["cam_intrinsic"], dim=0)
+        sample_dict["cam_extrinsic"] = torch.stack(sample_dict["cam_extrinsic"], dim=0)
+        sample_dict["laser_detections"] = torch.stack(sample_dict["laser_detections"], dim=0)
         return cls(**sample_dict)
 
 

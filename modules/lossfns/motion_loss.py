@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from utils.img_utils import transform_points
 from typing import Optional, Tuple
 
 
@@ -47,12 +48,12 @@ class MotionLoss(nn.Module):
 
         ego_target_motion: (N, T, 2), ego target motion
 
-        agent2scene_transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
+        agent2scene_transform: (N, num_agents, 4, 4), transformation matrix from agent level to scene (ego) level
             if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
         """
         if agent2scene_transform is not None:
             assert (
-                agent2scene_transform.shape[-1] == 3 and
+                agent2scene_transform.shape[-1] == 4 and
                 agent2scene_transform.shape[-2] == agent2scene_transform.shape[-1]
             )
 
@@ -227,12 +228,11 @@ class MotionLoss(nn.Module):
             covar: torch.Tensor, 
             transform: torch.Tensor
         ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        mu = transform_points(mu, transform_matrix=transform)
         
         R = transform[..., :2, :2]
-        T = transform[..., :2, [2]]
         R_T = R.transpose(-1, -2)
-        mu = (mu[..., 0] @ R_T) + T.transpose(-1, -2)
-        mu = mu[..., None]
         covar = R[..., None, :, :] @ covar @ R_T[..., None, :, :]
         return mu, covar
 

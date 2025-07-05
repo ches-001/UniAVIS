@@ -347,7 +347,7 @@ class DetectionHead(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim),
         )
         self.loc_module   = nn.Sequential(
-            nn.Linear(self.embed_dim, 6 if self.det_3d else 4),
+            nn.Linear(self.embed_dim, 6),
             nn.Sigmoid()
         )
         self.angle_module = nn.Linear(self.embed_dim, 1)

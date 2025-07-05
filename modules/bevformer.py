@@ -210,7 +210,7 @@ class BEVFormer(BaseFormer):
             NOTE: For your custom design, this is not necessary, in the original BEVFormer paper, BEV queries
             were learned and used in the same way that this lidar_features is used, so you can do that too.
 
-        :transition_matrices: (N, 3, 3), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
+        :transition_matrices: (N, 4, 4), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
 
         :cam_proj_matrices: (V, 3, 4) camera intrinsic matrices for each view, for projecting from real world
                             coordinate to
