@@ -32,13 +32,9 @@ bevformer:
   bev_query_hw: *bev_feature_hw
   z_ref_range: *z_ref_range
   learnable_pe: False
-
-pillarfeaturenet:
-  out_dim: *embed_dim
   pillar_wh: [0.16, 0.16]
   max_points: 100
   max_pillars: 12000
-  out_grid_hw: *bev_feature_hw
   xyz_range: [*x_range, *y_range, *z_ref_range]
 
 trackformer:

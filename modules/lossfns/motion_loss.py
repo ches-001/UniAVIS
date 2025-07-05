@@ -33,7 +33,7 @@ class MotionLoss(nn.Module):
             ego_pred_motion_modes: Optional[torch.Tensor]=None,
             ego_pred_mode_proba: Optional[torch.Tensor]=None,
             ego_target_motion: Optional[torch.Tensor]=None,
-            agent2scene_transform: Optional[torch.Tensor]=None
+            transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
         pred_motion_modes: (N, num_agents, k, T, 5), where k and T are number of modes and timesteps
@@ -48,13 +48,13 @@ class MotionLoss(nn.Module):
 
         ego_target_motion: (N, T, 2), ego target motion
 
-        agent2scene_transform: (N, num_agents, 4, 4), transformation matrix from agent level to scene (ego) level
+        transform: (N, num_agents, 4, 4), transformation matrix from agent level to scene (ego) level
             if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
         """
-        if agent2scene_transform is not None:
+        if transform is not None:
             assert (
-                agent2scene_transform.shape[-1] == 4 and
-                agent2scene_transform.shape[-2] == agent2scene_transform.shape[-1]
+                transform.shape[-1] == 4 and
+                transform.shape[-2] == transform.shape[-1]
             )
 
         if (
@@ -66,17 +66,17 @@ class MotionLoss(nn.Module):
             pred_mode_proba = torch.concat([ego_pred_mode_proba[:, None], pred_mode_proba], dim=1)
             target_motion = torch.concat([ego_target_motion[:, None], target_motion], axis=1)
 
-            if agent2scene_transform is not None:
-                ego_transform = torch.eye(agent2scene_transform.shape[-1])[None, None, :, :]
-                ego_transform = ego_transform.tile(agent2scene_transform.shape[0], 1, 1, 1)
-                agent2scene_transform = torch.concat([ego_transform, agent2scene_transform], axis=1)
+            if transform is not None:
+                ego_transform = torch.eye(transform.shape[-1])[None, None, :, :]
+                ego_transform = ego_transform.tile(transform.shape[0], 1, 1, 1)
+                transform = torch.concat([ego_transform, transform], axis=1)
         
         if self.as_gmm:
             if self.collapsed_gmm:
-                return self._collapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)
+                return self._collapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, transform)
             else:
-                return self._uncollapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)
-        return self._no_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, agent2scene_transform)
+                return self._uncollapsed_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, transform)
+        return self._no_mixture_forward(pred_motion_modes, pred_mode_proba, target_motion, transform)
 
 
     def _collapsed_mixture_forward(
@@ -84,7 +84,7 @@ class MotionLoss(nn.Module):
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
             target_motion: torch.Tensor,
-            agent2scene_transform: Optional[torch.Tensor]=None
+            transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
 
         pred_mode_proba = pred_mode_proba[..., None, None, None]
@@ -112,8 +112,8 @@ class MotionLoss(nn.Module):
 
         loss_mask = (target_motion != -999).all(dim=-1)
 
-        if agent2scene_transform is not None:
-            mixture_mu, mixture_covar = self._transform_mu_and_covar(mixture_mu, mixture_covar, agent2scene_transform)
+        if transform is not None:
+            mixture_mu, mixture_covar = self._transform_mu_and_covar(mixture_mu, mixture_covar, transform)
 
         log_proba = self._compute_dist_log_proba(input, mixture_mu, mixture_covar)
         log_proba = log_proba[loss_mask]
@@ -126,7 +126,7 @@ class MotionLoss(nn.Module):
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
             target_motion: torch.Tensor,
-            agent2scene_transform: Optional[torch.Tensor]=None
+            transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         
         pred_mode_proba = pred_mode_proba[..., None]
@@ -147,8 +147,8 @@ class MotionLoss(nn.Module):
 
         loss_mask = (target_motion != -999).all(dim=-1)
 
-        if agent2scene_transform is not None:
-            mu, covar = self._transform_mu_and_covar(mu, covar, agent2scene_transform[:, :, None])
+        if transform is not None:
+            mu, covar = self._transform_mu_and_covar(mu, covar, transform[:, :, None])
 
         log_pdf = self._compute_dist_log_proba(input, mu, covar)
         log_proba = torch.log(pred_mode_proba)
@@ -163,7 +163,7 @@ class MotionLoss(nn.Module):
             pred_motion_modes: torch.Tensor, 
             pred_mode_proba: torch.Tensor, 
             target_motion: torch.Tensor,
-            agent2scene_transform: Optional[torch.Tensor]
+            transform: Optional[torch.Tensor]
         ) -> torch.Tensor:
         
         num_modes = pred_motion_modes.shape[2]
@@ -210,8 +210,8 @@ class MotionLoss(nn.Module):
         motion_loss_mask = valid_target_mask
         mode_loss_mask = motion_loss_mask.any(dim=-1)
         
-        if agent2scene_transform is not None:
-            mu, covar = self._transform_mu_and_covar(mu, covar, agent2scene_transform)
+        if transform is not None:
+            mu, covar = self._transform_mu_and_covar(mu, covar, transform)
             
         log_pdf = self._compute_dist_log_proba(input, mu, covar)
         log_pdf = log_pdf[motion_loss_mask]
@@ -229,7 +229,7 @@ class MotionLoss(nn.Module):
             transform: torch.Tensor
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        mu = transform_points(mu, transform_matrix=transform)
+        mu = transform_points(mu[..., 0], transform_matrix=transform)[..., None]
         
         R = transform[..., :2, :2]
         R_T = R.transpose(-1, -2)

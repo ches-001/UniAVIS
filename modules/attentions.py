@@ -590,7 +590,7 @@ class TemporalSelfAttention(DeformableAttention):
             bev_queries: torch.Tensor,
             bev_spatial_shape: torch.Tensor,
             bev_histories: Optional[torch.Tensor]=None,
-            transition_matrices: Optional[torch.Tensor]=None,
+            transition: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
 
         """
@@ -602,7 +602,7 @@ class TemporalSelfAttention(DeformableAttention):
 
         :bev_histories: (N, H_bev * W_bev, C_bev) BEV features from the previous timestep t-1
 
-        :transition_matrices: (N, 4, 4) the matrix that transitions the ego vehicle from t-1 to t 
+        :transition: (N, 4, 4) the matrix that transitions the ego vehicle from t-1 to t 
                               (in homogeneous coordinates)
                               
         Returns
@@ -634,7 +634,7 @@ class TemporalSelfAttention(DeformableAttention):
             )
             return output
 
-        assert transition_matrices is not None
+        assert transition is not None
         # The goal of this subsection before the deformable attention section is to align the BEV feature 
         # history (B{t-1}) to the current BEV feature (B{t}). This is to ensure that we account fo the spatial 
         # change that has occured in the newly created BEV feature (B{t}).
@@ -654,7 +654,7 @@ class TemporalSelfAttention(DeformableAttention):
             bev_histories=bev_histories,
             grid_xy_res=self.grid_xy_res,
             bev_spatial_shape=bev_spatial_shape,
-            transition_matrices=transition_matrices,
+            transition=transition,
             device=device
         )
 
@@ -672,7 +672,7 @@ class TemporalSelfAttention(DeformableAttention):
         bev_histories: torch.Tensor,
         grid_xy_res: Tuple[float, float],
         bev_spatial_shape: torch.Tensor,
-        transition_matrices: torch.Tensor,
+        transition: torch.Tensor,
         device: Union[str, int, torch.device]="cpu"
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
@@ -690,12 +690,12 @@ class TemporalSelfAttention(DeformableAttention):
         bev_grid_2d          = torch.stack([xgrid, ygrid], dim=-1).to(dtype=torch.float32, device=device)
 
         # bev_grid_2d: (H_bev, W_bev, 2) -> (1, H_bev, W_bev, 1, 2)
-        # transition_matrices: (N, 4, 4) -> (N, 1, 1, 4, 4)
+        # transition: (N, 4, 4) -> (N, 1, 1, 4, 4)
         # aligned_grid: (N, H_bev, W_bev, 2)
-        bev_grid_2d         = bev_grid_2d[None, ..., None, :]
-        transition_matrices = transition_matrices[:, None, None, :, :]
-        aligned_grid        = transform_points(bev_grid_2d, transform_matrix=transition_matrices)
-        aligned_grid        = aligned_grid[..., 0, :]
+        bev_grid_2d  = bev_grid_2d[None, ..., None, :]
+        transition   = transition[:, None, None, :, :]
+        aligned_grid = transform_points(bev_grid_2d, transform_matrix=transition)
+        aligned_grid = aligned_grid[..., 0, :]
 
         aligned_grid[..., 0] /= x_range
         aligned_grid[..., 1] /= y_range
@@ -744,7 +744,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
             bev_spatial_shape: Tuple[int, int],
             multiscale_fmap_shapes: torch.Tensor,
             z_refs: torch.Tensor,
-            cam_proj_matrices: torch.Tensor,
+            projection: torch.Tensor,
         ) -> torch.Tensor:
         
         """
@@ -761,7 +761,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
 
         :z_refs: (num_z_ref_points, ) z-axis reference points
 
-        :cam_proj_matrices: (V, 3, 4) projection matrix for each camera, from real 3D coord (ego vehicle frame) to 3D image
+        :projection: (V, 3, 4) projection matrix for each camera, from real 3D coord (ego vehicle frame) to 3D image
             coord. This matrix is the product of the 3 x 3 (homogenized to 3 x 4) camera intrinsic matrix and the 4 x 4 camera
             camera extrinsic-inverse matrix with homogenized coordinates.
 
@@ -786,7 +786,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
             bev_spatial_shape=bev_spatial_shape,
             multiscale_fmap_shapes=multiscale_fmap_shapes,
             z_refs=z_refs,
-            cam_proj_matrices=cam_proj_matrices,
+            projection=projection,
             device=bev_queries.device
         )
         return super(SpatialCrossAttention, self).forward(
@@ -806,7 +806,7 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
             bev_spatial_shape: torch.Tensor,
             multiscale_fmap_shapes: torch.Tensor,
             z_refs: torch.Tensor,
-            cam_proj_matrices: torch.Tensor,
+            projection: torch.Tensor,
             device: Union[str, int, torch.device]="cpu"
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -842,13 +842,13 @@ class SpatialCrossAttention(MultiViewDeformableAttention):
         ones    = torch.ones(*grid_3d.shape[:-1], 1, device=device)
         grid_3d = torch.concat([grid_3d, ones], dim=-1)
 
-        # cam_proj_matrices: (V, 3, 4) -> (V, 1, 1, 1, 3, 4)
+        # projection: (V, 3, 4) -> (V, 1, 1, 1, 3, 4)
         # grid_3d:  (H_bev, W_bev, 4, 3)   -> (1, H_bev, W_bev, nz, 1, 3)
         # proj_2d: (V, H_bev, W_bev, nz, 2)
-        cam_proj_matrices = cam_proj_matrices[:, None, None, None, :, :]
-        grid_3d           = grid_3d[None, :, :, :, None, :]
-        proj_2d           = transform_points(grid_3d, transform_matrix=cam_proj_matrices)
-        proj_2d           = proj_2d[..., 0, :2]
+        projection = projection[:, None, None, None, :, :]
+        grid_3d    = grid_3d[None, :, :, :, None, :]
+        proj_2d    = transform_points(grid_3d, transform_matrix=projection)
+        proj_2d    = proj_2d[..., 0, :2]
 
         # We need reference points normalized to be within range (-1, 1), we just need to divide ref_points
         # by (x_range, y_range).

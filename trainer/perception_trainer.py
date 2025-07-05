@@ -22,7 +22,6 @@ class PerceptionTrainer(BaseTrainer):
     def __init__(
         self, 
         bevformer: nn.Module,
-        pillar_net: nn.Module,
         trackformer: nn.Module,
         mapformer: nn.Module,
         checkpoint_path: Optional[str]=None,
@@ -33,18 +32,15 @@ class PerceptionTrainer(BaseTrainer):
         super(PerceptionTrainer, self).__init__(ddp_mode, device_or_rank)
 
         self.bevformer = bevformer
-        self.pillar_net = pillar_net
         self.trackformer = trackformer
         self.mapformer = mapformer
 
         self.bevformer.to(self.device_or_rank)
-        self.pillar_net.to(self.device_or_rank)
         self.trackformer.to(self.device_or_rank)
         self.mapformer.to(self.device_or_rank)
 
         if self.ddp_mode:
             self.bevformer = DDP(self.bevformer, device_ids=[self.device_or_rank, ])
-            self.pillar_net = DDP(self.pillar_net, device_ids=[self.device_or_rank, ])
             self.trackformer = DDP(self.trackformer, device_ids=[self.device_or_rank, ])
             self.mapformer = DDP(self.mapformer, device_ids=[self.device_or_rank, ])
 

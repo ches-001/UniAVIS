@@ -236,7 +236,7 @@ class MotionFormer(BaseFormer):
             ego_query: torch.Tensor,
             agent_queries: torch.Tensor,
             map_queries: torch.Tensor,
-            transform_matrices: torch.Tensor,
+            transform: torch.Tensor,
             agent_pad_mask: Optional[torch.Tensor]=None,
             map_pad_mask: Optional[torch.Tensor]=None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
@@ -258,7 +258,7 @@ class MotionFormer(BaseFormer):
         :map_queries: (N, num_map_elements, embed_dim) Map queries from the MapFormer network 
             (num_map_elements = max number of mapped areas)
 
-        :transform_matrices: (N, num_agents, 4, 4) transformation (2D rotation and translation combined) matrix that 
+        :transform: (N, num_agents, 4, 4) transformation (2D rotation and translation combined) matrix that 
             transforms each agent from agent-level coordinates to scene-level coordinates (in homogeneous coordinates)
             NOTE: Scene level coordinate in this case refers to coordinates of ego-vehicle, as in the BEV
             scene, The ego vehicle center is the reference point
@@ -286,8 +286,8 @@ class MotionFormer(BaseFormer):
             
             mode_scores   (N, k)
         """
-        assert transform_matrices.shape[-1] == 4
-        assert transform_matrices.shape[-2] == transform_matrices.shape[-1]
+        assert transform.shape[-1] == 4
+        assert transform.shape[-2] == transform.shape[-1]
         
         batch_size = bev_features.shape[0]
         k          = agent_anchors.shape[0]
@@ -299,9 +299,9 @@ class MotionFormer(BaseFormer):
 
         agent_queries      = torch.concat([ego_query[:, None, :], agent_queries], dim=1)
 
-        ego_transform      = torch.eye(transform_matrices.shape[-1], device=device)
+        ego_transform      = torch.eye(transform.shape[-1], device=device)
         ego_transform      = ego_transform[None, None, :, :].tile(batch_size, 1, 1, 1)
-        transform_matrices = torch.concat([transform_matrices, ego_transform], dim=1)
+        transform = torch.concat([transform, ego_transform], dim=1)
 
         if agent_pad_mask is not None:
             agent_pad_mask = torch.concat([
@@ -328,11 +328,11 @@ class MotionFormer(BaseFormer):
         # NOTE: here, we only really need the last timestep of the agent level anchors and the scene level anchors.
         # agent_anchors shape: (1, k, 1, 2)
         # scene_anchors shape: (N, k, num_agents, 2)
-        transform_matrices = transform_matrices[:, None]
-        agent_anchors      = agent_anchors[None, :, None, None, :]
-        scene_anchors      = transform_points(agent_anchors, transform_matrix=transform_matrices)
-        agent_anchors      = agent_anchors[..., 0, :]
-        scene_anchors      = scene_anchors[..., 0, :]
+        transform      = transform[:, None]
+        agent_anchors  = agent_anchors[None, :, None, None, :]
+        scene_anchors  = transform_points(agent_anchors, transform_matrix=transform)
+        agent_anchors  = agent_anchors[..., 0, :]
+        scene_anchors  = scene_anchors[..., 0, :]
 
         agent_current_pos     = agent_current_pos[:, None, ...]
         agent_anchors_emb     = self.agent_anchor_fc(self.spatial_pos_emb(agent_anchors))
@@ -390,7 +390,7 @@ class MotionFormer(BaseFormer):
             xy_traj            = torch.cumsum(mode_traj[..., :2], dim=3)
             mode_traj          = torch.concat([xy_traj, mode_traj[..., 2:4], torch.tanh(mode_traj[..., 4:])], dim=-1)
             agent_goal_pos     = mode_traj[..., [-1], :2]
-            agent_goal_pos     = transform_points(agent_goal_pos, transform_matrix=transform_matrices)
+            agent_goal_pos     = transform_points(agent_goal_pos, transform_matrix=transform)
             agent_goal_pos_emb = self.goal_pos_fc(self.spatial_pos_emb(agent_goal_pos[..., 0, :]))
             query_pos_emb      = agent_anchors_emb + scene_anchors_emb + agent_current_pos_emb + agent_goal_pos_emb
             queries            = ctx_queries + query_pos_emb

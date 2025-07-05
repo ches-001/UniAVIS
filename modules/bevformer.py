@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 from torchvision.models import resnet
 from .base import BaseFormer
-from .backbone import ResNetBackBone
+from .img_backbone import ResNetBackBone
 from .attentions import (
     DeformableAttention, 
     MultiViewDeformableAttention, 
     TemporalSelfAttention, 
     SpatialCrossAttention
 )
+from .pointpillar_net import PointPillarNet
 from .common import AddNorm, PosEmbedding2D, SimpleMLP
 from typing import Optional, Tuple, Type, Union
     
@@ -70,7 +71,6 @@ class BEVFormerEncoderLayer(nn.Module):
             sca_ref_points: torch.Tensor,
             sca_attention_mask: torch.Tensor,
             multiscale_fmap_shapes: torch.Tensor,
-            transition_matrices: torch.Tensor,
             tsa_ref_points: torch.Tensor,
             bev_histories: Optional[torch.Tensor]=None,
         ) -> torch.Tensor:
@@ -92,8 +92,6 @@ class BEVFormerEncoderLayer(nn.Module):
             with continuous values it is directly multiplied with the attention weights
 
         :multiscale_fmap_shapes: (L, 2) shape of each spatial feature across levels [[H0, W0], ...[Hn, Wn]]
-
-        :transition_matrices: (N, 3, 3), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
 
         :tsa_ref_points: (N, query_len, 1, 2)
 
@@ -151,7 +149,8 @@ class BEVFormer(BaseFormer):
             grid_xy_res: Tuple[float, float]=(0.512, 0.512),
             bev_query_hw: Tuple[int, int]=(200, 200),
             z_ref_range: Tuple[float, float]=(-5.0, 3.0),
-            learnable_pe: bool=False
+            learnable_pe: bool=False,
+            **kwargs
         ):
         
         super(BEVFormer, self).__init__()
@@ -174,6 +173,7 @@ class BEVFormer(BaseFormer):
         self.learnable_pe      = learnable_pe
         self.offset_scale      = offset_scale
 
+        self.point_net         = PointPillarNet(out_dim=self.embed_dim, out_grid_hw=self.bev_query_hw, **kwargs)
         self.backbone          = ResNetBackBone(self.in_img_channels, embed_dim, self.bb_block, self.bb_block_layers)
         self.bev_pos_emb       = PosEmbedding2D(*bev_query_hw, embed_dim=self.embed_dim, learnable=self.learnable_pe)
         self.encoder_modules   = self._create_encoder_layers()
@@ -196,9 +196,9 @@ class BEVFormer(BaseFormer):
     def forward(
             self, 
             imgs: torch.Tensor,
-            lidar_features: torch.Tensor,
-            transition_matrices: torch.Tensor,
-            cam_proj_matrices: torch.Tensor,
+            lidar_points: torch.Tensor,
+            projection: torch.Tensor,
+            transition: Optional[torch.Tensor]=None,
             bev_histories: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
@@ -206,18 +206,18 @@ class BEVFormer(BaseFormer):
         --------------------------------
         :imgs: (N, V, C, H, W) batch of multiview images
 
-        :lidar_features: (N, C, H, W) batch of LIDAR features from the PointPillarNet
-            NOTE: For your custom design, this is not necessary, in the original BEVFormer paper, BEV queries
-            were learned and used in the same way that this lidar_features is used, so you can do that too.
+        :lidar_points: (N, n, d), input batch of points with d dimensions:
+            (N = batch size, n = number of points per pillar, d = number of dimensions)
 
-        :transition_matrices: (N, 4, 4), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
+        :projection: (V, 3, 4) camera projection matrices for each view, for projecting from real (ego) world
+            coordinate to image space
 
-        :cam_proj_matrices: (V, 3, 4) camera intrinsic matrices for each view, for projecting from real world
-                            coordinate to
+        :transition: (N, 4, 4), Ego vehicle Motion matrix that transitions the vehicle position at t-1 to t
+            Only needed if bev_histories is provided
 
         :bev_histories: (N, H_bev*W_bev, C_bev), BEV features from previous timestep t-1
 
-        NOTE: Do note that the BEV grid space is merely a discretized global (real world) coordinate space.
+        NOTE: Do note that the BEV grid space is merely a discretized ego coordinate space.
 
         Returns
         --------------------------------
@@ -225,10 +225,11 @@ class BEVFormer(BaseFormer):
         """
         batch_size, num_views, C_img, H_img, W_img = imgs.shape
         H_bev, W_bev = self.bev_query_hw
-    
-        device               = imgs.device
-        imgs                 = imgs.reshape(batch_size * num_views, C_img, H_img, W_img)
-        multiscale_fmaps     = self.backbone(imgs)
+        device       = imgs.device
+
+        imgs             = imgs.reshape(batch_size * num_views, C_img, H_img, W_img)
+        multiscale_fmaps = self.backbone(imgs)
+        lidar_features   = self.point_net(lidar_points)
 
         assert len(multiscale_fmaps) == self.num_fmap_levels
         assert all([fmap.shape[1] == self.embed_dim for fmap in multiscale_fmaps])
@@ -261,23 +262,25 @@ class BEVFormer(BaseFormer):
             bev_spatial_shape=bev_spatial_shape,
             multiscale_fmap_shapes=multiscale_fmap_shapes,
             z_refs=self.z_refs,
-            cam_proj_matrices=cam_proj_matrices,
+            projection=projection,
             device=device
         )
 
         tsa_ref_points = TemporalSelfAttention.generate_standard_ref_points(
             self.bev_query_hw, 
             batch_size=batch_size, 
-            device=device, normalize=True
+            device=device, 
+            normalize=True
         )
         tsa_ref_points = tsa_ref_points[..., None, :]
 
         if bev_histories is not None:
+            assert transition is not None
             bev_histories = TemporalSelfAttention.align_bev_histories(
                 bev_histories, 
                 grid_xy_res=self.grid_xy_res,
                 bev_spatial_shape=bev_spatial_shape,
-                transition_matrices=transition_matrices,
+                transition=transition,
                 device=device
             )
 
@@ -289,7 +292,6 @@ class BEVFormer(BaseFormer):
                 sca_ref_points=sca_ref_points,
                 sca_attention_mask=sca_attention_mask,
                 multiscale_fmap_shapes=multiscale_fmap_shapes,
-                transition_matrices=transition_matrices,
                 tsa_ref_points=tsa_ref_points,
                 bev_histories=bev_histories
             )

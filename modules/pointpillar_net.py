@@ -149,7 +149,7 @@ class SimplifiedPointNet(nn.Module):
         return x
     
 
-class PillarFeatureNet(nn.Module):
+class PointPillarNet(nn.Module):
     def __init__(
             self,
             out_dim: int=128,
@@ -159,7 +159,7 @@ class PillarFeatureNet(nn.Module):
             out_grid_hw: int=(200, 200),
             xyz_range: Optional[List[Tuple[float, float]]]=None,
     ):
-        super(PillarFeatureNet, self).__init__()
+        super(PointPillarNet, self).__init__()
 
         self.out_grid_hw    = out_grid_hw
         self.pillar_gen     = PillarFeatureGenerator(
