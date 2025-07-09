@@ -3,9 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class OccLoss(nn.Module):
-    def __init__(self, bce_lambda: float, dice_lambda: float, main_lambda: float, aux_lambda: float, eps: float=1e-5):
+    def __init__(self, bce_lambda: float, dice_lambda: float, main_lambda: float, aux_lambda: float):
         super(OccLoss, self).__init__()
-        self.eps = eps
         self.bce_lambda = bce_lambda
         self.dice_lambda = dice_lambda
         self.main_lambda = main_lambda
@@ -52,5 +51,6 @@ class OccLoss(nn.Module):
     def _dice_score(self, pred_mask: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
         a = 2 * (pred_mask * target_mask).sum(dim=(-2. -1))
         b = pred_mask.sum(dim=(-2. -1)) + target_mask.sum(dim=(-2. -1))
-        dice_score = (a + self.eps) / (b + self.eps)
+        eps = torch.finfo(pred_mask.dtype).eps
+        dice_score = (a + eps) / (b + eps)
         return dice_score

@@ -123,9 +123,8 @@ class VectorMapLoss(TrackLoss):
     
 
 class RasterMapLoss(VectorMapLoss):
-    def __init__(self, *args, eps: float=1e-5, **kwargs):
+    def __init__(self, *args, **kwargs):
         super(RasterMapLoss, self).__init__(*args, **kwargs)
-        self.eps = eps
 
     def forward(
             self, 
@@ -181,7 +180,8 @@ class RasterMapLoss(VectorMapLoss):
         _, h, w = pred_seg_masks.shape
         pos_sum = target_seg_masks.sum(dim=(1, 2), keepdim=True)
         neg_sum = (h * w) - pos_sum
-        pos_weight = (neg_sum / (pos_sum + self.eps))
+        eps = torch.finfo(pred_seg_masks.dtype).eps
+        pos_weight = (neg_sum / (pos_sum + eps))
 
         polygen_loss = F.binary_cross_entropy_with_logits(pred_seg_masks, target_seg_masks, pos_weight=pos_weight, reduction="mean")
         loss = det_loss + polygen_loss

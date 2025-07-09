@@ -1,6 +1,6 @@
 import torch
 
-def compute_2d_ciou(preds_2dbox: torch.Tensor, targets_2dbox: torch.Tensor, eps: float=1e-5) -> torch.Tensor:
+def compute_2d_ciou(preds_2dbox: torch.Tensor, targets_2dbox: torch.Tensor) -> torch.Tensor:
     """
     Complete Intersection Over Union for 3D boxes.
 
@@ -10,6 +10,8 @@ def compute_2d_ciou(preds_2dbox: torch.Tensor, targets_2dbox: torch.Tensor, eps:
     [center_x, center_y, width, height]
     """
     assert preds_2dbox.shape[-1] == targets_2dbox.shape[-1] and targets_2dbox.shape[-1] == 4
+
+    eps = torch.finfo(preds_2dbox.dtype).eps
 
     preds_w = preds_2dbox[..., 2:3]
     preds_h = preds_2dbox[..., 3:4]
@@ -50,7 +52,7 @@ def compute_2d_ciou(preds_2dbox: torch.Tensor, targets_2dbox: torch.Tensor, eps:
     return ciou.squeeze(-1)
 
 
-def compute_3d_ciou(preds_3dbox: torch.Tensor, targets_3dbox: torch.Tensor, eps: float=1e-5) -> torch.Tensor:
+def compute_3d_ciou(preds_3dbox: torch.Tensor, targets_3dbox: torch.Tensor) -> torch.Tensor:
     """
     Complete Intersection Over Union for 3D boxes.
 
@@ -60,6 +62,8 @@ def compute_3d_ciou(preds_3dbox: torch.Tensor, targets_3dbox: torch.Tensor, eps:
     [center_x, center_y, center_z, length, width, height]
     """
     assert preds_3dbox.shape[-1] == targets_3dbox.shape[-1] and targets_3dbox.shape[-1] == 6
+    
+    eps = torch.finfo(preds_3dbox.dtype).eps
 
     preds_l = preds_3dbox[..., 3:4]
     preds_w = preds_3dbox[..., 4:5]
