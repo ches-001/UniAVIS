@@ -34,6 +34,12 @@ def compute_2d_ciou(preds_2dbox: torch.Tensor, targets_2dbox: torch.Tensor, eps:
     cw = (torch.max(preds_x2, targets_x2) - torch.min(preds_x1, targets_x1))
     ch = (torch.max(preds_y2, targets_y2) - torch.min(preds_y1, targets_y1))
     c_sq = cw.pow(2) + ch.pow(2) + eps
+
+    # this helps on the rare and improbable occasion that the model predicts 0s as bbox dimensions
+    # although if this happens, something is already very wrong somewhere
+    preds_w = preds_w + eps
+    preds_h = preds_h + eps
+    
     v = (4 / (torch.pi**2)) * (torch.arctan(targets_w / targets_h) - torch.arctan(preds_w / preds_h)).pow(2)
     d_sq = (preds_2dbox[..., :1] - targets_2dbox[..., :1]).pow(2) + (preds_2dbox[..., 1:2] - targets_2dbox[..., 1:2]).pow(2)
 
@@ -87,6 +93,13 @@ def compute_3d_ciou(preds_3dbox: torch.Tensor, targets_3dbox: torch.Tensor, eps:
     cw = (torch.max(preds_y2, targets_y2) - torch.min(preds_y1, targets_y1))
     ch = (torch.max(preds_z2, targets_z2) - torch.min(preds_z1, targets_z1))
     c_sq = cl.pow(2) + cw.pow(2) + ch.pow(2) + eps
+
+    # this helps on the rare and improbable occasion that the model predicts 0s as bbox dimensions
+    # although if this happens, something is already very wrong somewhere
+    preds_l = preds_l + eps
+    preds_w = preds_w + eps
+    preds_h = preds_h + eps
+
     v = (4 / (3 * torch.pi**2)) * (
         (torch.arctan(targets_l / targets_w) - torch.arctan(preds_l / preds_w)) +
         (torch.arctan(targets_w / targets_h) - torch.arctan(preds_w / preds_h)) +

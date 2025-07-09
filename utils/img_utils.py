@@ -83,7 +83,7 @@ def point_clouds_to_binary_bev_maps(
 
 
 def generate_occupancy_map(
-        motion_tracks: torch.Tensor,
+        agent_motions: torch.Tensor,
         map_hw: Tuple[int, int], 
         x_min: float=-51.2,
         x_max: float=51.2,
@@ -94,7 +94,7 @@ def generate_occupancy_map(
     """
     Inputs
     --------------------------------
-    :motion_tracks: 
+    :agent_motions: 
         shape: (num_detections, num_timesteps, D)
 
     :map_hw:
@@ -117,31 +117,31 @@ def generate_occupancy_map(
     :detection instance level binary BEV map:
         shape: (num_detections, num_timesteps, bev_H, bev_W)
     """
-    xy_pos = motion_tracks[..., :2]
+    xy_pos = agent_motions[..., :2]
 
-    num_dets, num_timesteps = motion_tracks.shape[:2]
+    num_dets, num_timesteps = agent_motions.shape[:2]
 
     relative_xy_corners = torch.stack([
-        torch.stack([-motion_tracks[..., 3], -motion_tracks[..., 4]], dim=2),
-        torch.stack([+motion_tracks[..., 3], -motion_tracks[..., 4]], dim=2),
-        torch.stack([+motion_tracks[..., 3], +motion_tracks[..., 4]], dim=2),
-        torch.stack([-motion_tracks[..., 3], +motion_tracks[..., 4]], dim=2)
+        torch.stack([-agent_motions[..., 3], -agent_motions[..., 4]], dim=2),
+        torch.stack([+agent_motions[..., 3], -agent_motions[..., 4]], dim=2),
+        torch.stack([+agent_motions[..., 3], +agent_motions[..., 4]], dim=2),
+        torch.stack([-agent_motions[..., 3], +agent_motions[..., 4]], dim=2)
     ], dim=2)
     relative_xy_corners /= 2
 
-    heading_angles = motion_tracks[..., -1]
+    heading_angles = agent_motions[..., -1]
     heading_cos = torch.cos(heading_angles)
     heading_sin = torch.sin(heading_angles)
     rotations = torch.stack(
         [heading_cos, heading_sin, -heading_sin, heading_cos],
-    axis=2).reshape(*motion_tracks.shape[:2], 2, 2)
+    axis=2).reshape(*agent_motions.shape[:2], 2, 2)
 
     vertices = torch.matmul(relative_xy_corners, rotations) + xy_pos[:, :, None, :]
     vertices[..., 0] = ((vertices[..., 0] - x_min) / (x_max - x_min)) * (map_hw[1] - 1)
     vertices[..., 1] = ((vertices[..., 1] - y_min) / (y_max - y_min)) * (map_hw[0] - 1)
 
     vertices = vertices.cpu().to(dtype=torch.int64).numpy()
-    occ_maps = np.zeros((*motion_tracks.shape[:2], *map_hw), dtype=np.uint8)
+    occ_maps = np.zeros((*agent_motions.shape[:2], *map_hw), dtype=np.uint8)
 
     # TODO: This block of code might needs optimization
     for tidx in range(0, num_timesteps):
@@ -230,21 +230,21 @@ def rotate_points(points: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
     return torch.matmul(points, rotation_matrix.transpose(-1, -2))[..., :]
 
 
-def translate_points(points: torch.Tensor, ref_point: torch.Tensor) -> torch.Tensor:
+def translate_points(points: torch.Tensor, locs: torch.Tensor) -> torch.Tensor:
     """
     Translate a point to the frame of a reference point.
     
     points: (N, ..., d)  expects either 2D or 3D points
-    ref_point: (N, ..., d)  expects either 2D or 3D points
+    locs: (N, ..., d)  reference points to translate to, expects either 2D or 3D points
     """
-    assert points.shape[-1] == ref_point.shape[-1]
-    return points - ref_point
+    assert points.shape[-1] == locs.shape[-1]
+    return points + locs
 
 
 def transform_points(
         points: torch.Tensor, 
         *, 
-        ref_points: Optional[torch.Tensor]=None, 
+        locs: Optional[torch.Tensor]=None, 
         angles: Optional[torch.Tensor]=None,
         transform_matrix: Optional[torch.Tensor]=None
     ) -> torch.Tensor:
@@ -253,14 +253,14 @@ def transform_points(
 
     points: (N, ..., d)  expects either 2D or 3D points
     angle: (N, ...) heading / rotation angle in radiance
-    ref_point: (N, ..., d)  expects either 2D or 3D points
+    ref_point: (N, ..., d)  reference points to translate to, expects either 2D or 3D points
     transform_matrix: (N, ..., d, d)
     """
     if angles is not None:
         points = rotate_points(points, angles)
 
-    if ref_points is not None:
-        points = translate_points(points, ref_points)
+    if locs is not None:
+        points = translate_points(points, locs)
     
     if transform_matrix is not None:
         assert transform_matrix.shape[-1] in [2, 3, 4]

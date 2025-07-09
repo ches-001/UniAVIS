@@ -33,7 +33,7 @@ class TrackLoss(nn.Module):
             ego_preds: Optional[torch.Tensor]=None,
             ego_targets: Optional[torch.Tensor]=None,
             prev_track_ids: Optional[torch.Tensor]=None
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         preds:          (N, num_dets, d)
         targets:        (N, num_dets, d)
@@ -42,9 +42,13 @@ class TrackLoss(nn.Module):
         prev_track_ids: (N, num_dets)
         """
         if prev_track_ids is None:
-            loss = self._first_frame_forward(preds, targets)
+            loss, pred_indexes, target_indexes, track_ids, pred_track_mask = self._first_frame_forward(
+                preds, targets, ignore_bg_cls=False
+            )
         else:
-            loss = self._next_frame_forward(preds, targets, prev_track_ids)
+            loss, pred_indexes, target_indexes, track_ids, pred_track_mask = self._next_frame_forward(
+                preds, targets, prev_track_ids
+            )
 
         if ego_preds is not None and ego_targets is not None:
             ego_ciou_loss, ego_l1_box_loss = self._box_ciou_and_l1_loss(
@@ -64,13 +68,14 @@ class TrackLoss(nn.Module):
             )
             loss = loss + (ego_loss / (preds.shape[0] * preds.shape[1]))
 
-        return loss
+        return loss, pred_indexes, target_indexes, track_ids, pred_track_mask
 
 
     def _first_frame_forward(
             self, 
             preds: torch.Tensor, 
-            targets: torch.Tensor
+            targets: torch.Tensor,
+            ignore_bg_cls: bool=False
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
         device = preds.device
@@ -89,7 +94,7 @@ class TrackLoss(nn.Module):
 
         pred_cls_logits = preds[:, :, None, pred_cls_start_idx:]
         target_cls = targets[:, :, target_cls_idx]
-        target_cls_proba = self._make_cls_match_targets(target_cls, batch_indexes, num_cls=preds.shape[-1])
+        target_cls_proba = self._make_cls_match_targets(target_cls, batch_indexes, num_cls=pred_cls_logits.shape[-1])
         target_cls_proba = target_cls_proba[:, None, :, :]
         cls_loss, cls_cost_mat = self._cls_loss_and_cls_match_cost(pred_cls_logits, target_cls_proba)
 
@@ -117,11 +122,14 @@ class TrackLoss(nn.Module):
         loss_mask = torch.zeros_like(costs_mat, dtype=torch.bool)
         loss_mask[batch_indexes, pred_indexes, target_indexes] = 1
         
-        cls_loss = cls_loss[loss_mask].mean()
-
-        # After computing the cls_loss, the loss_mask is further edited to ensure that indexes that match
-        # a prediction to a pading target is excluded from the other loss computation 
-        loss_mask[torch.ones_like(track_ids)[:, :, None] & (track_ids == -999)[:, None, :]] = 0
+        if ignore_bg_cls:
+            # After computing the cls_loss, the loss_mask is further edited to ensure that indexes 
+            # that correspond to padding targets / background classes are ignored.
+            loss_mask = torch.masked_fill(loss_mask, ~pred_track_mask[:, None, :], 0)
+            cls_loss = cls_loss[loss_mask].mean()
+        else:
+            cls_loss = cls_loss[loss_mask].mean()
+            loss_mask = torch.masked_fill(loss_mask, ~pred_track_mask[:, None, :], 0)
 
         ciou_loss = ciou_cost_mat[loss_mask].mean()
         l1_box_loss = l1_box_cost_mat[loss_mask].mean()
@@ -171,6 +179,7 @@ class TrackLoss(nn.Module):
         
         flat_pred_idx = None
         flat_target_idx = None
+        loss = 0
 
         if torch.any(match_mask):
             b_idx, pred_idx, target_idx = torch.where(match_mask)
@@ -202,10 +211,10 @@ class TrackLoss(nn.Module):
 
         # previous tracks not matched to any current target tracks due to out-of-frame or occlusion
         disappeared_mask = nomatch_mask.all(dim=-1)
-        disappeared_preds = preds[disappeared_mask]
+        disappeared_preds = preds[..., pred_cls_start_idx:][disappeared_mask]
 
         if torch.any(disappeared_mask):
-            bg_targets = torch.zeros(*disappeared_preds.shape[0], device=device, dtype=torch.int64)
+            bg_targets = torch.zeros(disappeared_preds.shape[0], device=device, dtype=torch.int64)
             bg_targets.fill_(bg_cls_idx)
             bg_loss = self._cls_loss(disappeared_preds, bg_targets, torch.arange(bg_targets.shape[0], device=device))
             loss = loss + bg_loss.mean()
@@ -215,14 +224,28 @@ class TrackLoss(nn.Module):
         nomatch_pred_mask = (~match_pred_mask) & (~disappeared_mask)
 
         if torch.any(nomatch_target_mask):
-            new_preds = torch.zeros_like(preds)
             new_targets = torch.zeros_like(targets)
+            new_preds = torch.zeros_like(preds)
+
             new_targets.fill_(-999)
-            new_preds[nomatch_pred_mask] = preds[nomatch_pred_mask]
+            new_targets[..., -1][new_targets[..., 0] == -999] = bg_cls_idx
+
+            # bg logits need to be set for bg targets because the softmax of an all
+            # 0s tensor is a tensor of NaN values.
+            bg_logits =  F.one_hot(new_targets[..., -1].long(), num_classes=num_cls)
+            bg_logits = bg_logits.to(dtype=new_preds.dtype, device=new_preds.device)
+            new_preds[..., pred_cls_start_idx:] = bg_logits
+
             new_targets[nomatch_target_mask] = targets[nomatch_target_mask]
+            new_preds[nomatch_pred_mask] = preds[nomatch_pred_mask]
+
+            # since new_preds is initialized with 0s, and only updated with valid predictions
+            # at certain indexes, you may wonder how the linear_sum_assignment function does
+            # not raise errors caused by NaN values from the CIoU computation, which are caused
+            # by 0 sized bounding boxes, checkout the CIoU function in utils/metric_utils.py
             (
                 new_loss, pred_indexes, target_indexes, new_track_ids, new_track_mask
-            ) = self._first_frame_forward(new_preds, new_targets)
+            ) = self._first_frame_forward(new_preds, new_targets, ignore_bg_cls=True)
 
             output_track_ids[new_track_mask] = new_track_ids[new_track_mask]
             loss = loss + new_loss.mean()
@@ -237,8 +260,8 @@ class TrackLoss(nn.Module):
             pred_indexes[flat_pred_idx] = flat_pred_idx % preds.shape[1]
             target_indexes[flat_pred_idx] = flat_target_idx % targets.shape[1]
 
-            pred_indexes = pred_indexes.unflatten(dim=0, sizes=preds.shape)
-            target_indexes = target_indexes.unflatten(dim=0, sizes=targets.shape)
+            pred_indexes = pred_indexes.unflatten(dim=0, sizes=preds.shape[:2])
+            target_indexes = target_indexes.unflatten(dim=0, sizes=targets.shape[:2])
 
         pred_track_mask = output_track_ids.clone()
         pred_track_mask[pred_track_mask != -999] = 1
@@ -268,13 +291,14 @@ class TrackLoss(nn.Module):
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         if is_3d:
-            ciou_loss = 1- compute_2d_ciou(preds, targets)
-        else:
             ciou_loss = 1 - compute_3d_ciou(preds, targets)
+        else:
+            ciou_loss = 1 - compute_2d_ciou(preds, targets)
         # the l1_los function might cause a warning, when predictions and targets of different shapes,
         # specifically when computing the matching cost matrix with prediction and target shapes of:
         # [N, N_pred, 1] and [N, 1, N_target] respectively. It is absolutely in this situation.
         l1_loss = F.l1_loss(preds, targets, reduction="none")
+        l1_loss = l1_loss.mean(dim=-1)
         return ciou_loss, l1_loss
 
 

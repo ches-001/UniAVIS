@@ -33,7 +33,7 @@ class WaymoDataset(Dataset):
             ego_vehicle_dims: Tuple[float, float, float]=(5.182, 2.032, 1.778),
             num_cloud_points: int=100_000,
             xyz_range: Optional[List[Tuple[float, float]]]=None,
-            frames_per_sample: int=4,
+            frames_per_sample: int=3,
             sample_period_secs: Optional[float]=2.0,
             max_num_agents: int=100,
             max_num_map_elements: int=100,
@@ -174,73 +174,74 @@ class WaymoDataset(Dataset):
 
         cam_views = self._load_cam_views(frame_dict)
         point_cloud = self._load_point_cloud(frame_dict)
-        laser_detections = self._load_laser_labels(frame_dict, obj_id_map=obj_id_map)
+        tracks = self._load_track_labels(frame_dict, obj_id_map=obj_id_map)
         ego_pose, cam_intrinsic, cam_extrinsic = self._load_ego_pose_and_transforms(frame_dict)            
 
-        motion_tracks = None
+        agent_motions = None
         occupancy_map = None
         map_elements_polylines = None
         map_elements_boxes = None
-        ego_trajectory = None
-        motion_tracks = None
+        ego_motions = None
+        agent_motions = None
         command = None
 
         if not is_partial_data:
-            motion_tracks = self._generate_motion_trajectory(sample_dict, frame_idx)
-            occupancy_map = self._generate_occupancy_map(motion_tracks)
-            ego_trajectory = self._get_planning_trajectory(sample_dict, frame_idx, ego_pose)
-            command = self._get_high_level_command(ego_trajectory)
+            agent_motions = self._get_agent_motions(sample_dict, frame_idx)
+            occupancy_map = self._generate_occupancy_map(agent_motions)
+            ego_motions = self._get_ego_motions(sample_dict, frame_idx, ego_pose)
+            command = self._get_high_level_command(ego_motions)
             map_elements_polylines, map_elements_boxes = self._load_bev_map_elements(frame_dict)
-            motion_tracks = motion_tracks[:, 1:, :2]
+            agent_motions = agent_motions[:, 1:, :2]
 
             # pad targets
             map_element_pad = max(0, self.max_num_map_elements - map_elements_polylines.shape[0])
-            agents_pad = max(0, self.max_num_agents - motion_tracks.shape[0])
-            ego_plan_pad = max(0, self.planning_horizon - ego_trajectory.shape[0])
-            map_label_pad_val = len(self.metadata["LABELS"]["MAP_ELEMENT_LABEL_INDEXES"])
-            map_point_pad_val = -999
+            agents_pad = max(0, self.max_num_agents - agent_motions.shape[0])
+            ego_plan_pad = max(0, self.planning_horizon - ego_motions.shape[0])
             
             map_elements_polylines = F.pad(
-                map_elements_polylines, pad=(0, 0, 0, 0, 0, map_element_pad), mode="constant", value=map_point_pad_val
+                map_elements_polylines, pad=(0, 0, 0, 0, 0, map_element_pad), mode="constant", value=-999
             )
             map_elements_boxes = F.pad(
-                map_elements_boxes, pad=(0, 0, 0, map_element_pad), mode="constant", value=map_label_pad_val
+                map_elements_boxes, pad=(0, 0, 0, map_element_pad), mode="constant", value=-999
             )
-            motion_tracks = F.pad(
-                motion_tracks, pad=(0, 0, 0, 0, 0, agents_pad), mode="constant", value=-999
+            agent_motions = F.pad(
+                agent_motions, pad=(0, 0, 0, 0, 0, agents_pad), mode="constant", value=-999
             )
             occupancy_map = F.pad(
                 occupancy_map, pad=(0, 0, 0, 0, 0, 0, 0, agents_pad), mode="constant", value=-999
             )
 
-            ego_trajectory = F.pad(
-                ego_trajectory, pad=(0, 0, 0, ego_plan_pad), mode="constant", value=-999
+            ego_motions = F.pad(
+                ego_motions, pad=(0, 0, 0, ego_plan_pad), mode="constant", value=-999
             )
         
-        det_pad = self.max_num_agents - laser_detections.shape[0]
-        det_label_pad_val = len(self.metadata["LABELS"]["DETECTION_LABEL_INDEXES"])
-        laser_detections = F.pad(laser_detections, pad=(0, 0, 0, det_pad), mode="constant", value=-999)
-        laser_detections[:, -1][laser_detections[:, -1] == -999] = det_label_pad_val
+            map_cls_pad_val = len(self.metadata["LABELS"]["MAP_ELEMENT_LABEL_INDEXES"])
+            map_elements_boxes[:, -1][map_elements_boxes[:, -1] == -999] = map_cls_pad_val
+
+        det_pad = self.max_num_agents - tracks.shape[0]
+        det_cls_pad_val = len(self.metadata["LABELS"]["DETECTION_LABEL_INDEXES"])
+        tracks = F.pad(tracks, pad=(0, 0, 0, det_pad), mode="constant", value=-999)
+        tracks[:, -1][tracks[:, -1] == -999] = det_cls_pad_val
 
         frame_data = FrameData(
             cam_views=cam_views,
             point_cloud=point_cloud,
             ego_pose=ego_pose,
-            laser_detections=laser_detections,
+            tracks=tracks,
             cam_intrinsic=cam_intrinsic,
             cam_extrinsic=cam_extrinsic,
-            motion_tracks=motion_tracks,
+            agent_motions=agent_motions,
             occupancy_map=occupancy_map,
             map_elements_polylines=map_elements_polylines,
             map_elements_boxes=map_elements_boxes,
-            ego_trajectory=ego_trajectory,
+            ego_motions=ego_motions,
             command=command
         )
         return frame_data
 
 
     @check_perf
-    def _generate_motion_trajectory(self, sample_dict: Dict[str, Any], frame_idx: int) -> torch.Tensor:
+    def _get_agent_motions(self, sample_dict: Dict[str, Any], frame_idx: int) -> torch.Tensor:
         num_frames = len(sample_dict)
         max_horizon = max(self.motion_horizon, self.occupancy_horizon)
         
@@ -252,7 +253,7 @@ class WaymoDataset(Dataset):
         iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
         iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
 
-        track_maps = {}
+        motions_maps = {}
         for idx in range(iter_start, iter_end, iter_step):
             laser_labels_path = sample_dict[idx]["laser_labels_path"]
             laser_labels_list = load_pickle_file(laser_labels_path)
@@ -266,9 +267,9 @@ class WaymoDataset(Dataset):
                     or (obj_3d_bbox["center_z"] < self.xyz_range[2][0] or obj_3d_bbox["center_z"] > self.xyz_range[2][1])
                 ): continue
                 
-                if obj_id not in track_maps:
+                if obj_id not in motions_maps:
                     if idx == frame_idx:
-                        track_maps[obj_id] = []
+                        motions_maps[obj_id] = []
                     else: continue
                 
                 obj_det = [
@@ -280,18 +281,18 @@ class WaymoDataset(Dataset):
                     obj_3d_bbox["height"],
                     obj_3d_bbox["heading"],
                 ]
-                track_maps[obj_id].append(obj_det)
+                motions_maps[obj_id].append(obj_det)
         # NOTE: Nested tensors is experimental feature and may change behaviour in the future
         # shape: (num_detections, motion_timesteps, 8)
-        tracks = torch.nested.nested_tensor(list(track_maps.values())).to_padded_tensor(-999)
-        return tracks
+        motions = torch.nested.nested_tensor(list(motions_maps.values())).to_padded_tensor(-999)
+        return motions
 
     
     @check_perf
-    def _generate_occupancy_map(self, motion_tracks: torch.Tensor) -> torch.Tensor:
+    def _generate_occupancy_map(self, agent_motions: torch.Tensor) -> torch.Tensor:
         # shape: (num_detections, timesteps, H_bev, W_bev)
         occ_map = generate_occupancy_map(
-            motion_tracks[:, :self.occupancy_horizon, :], 
+            agent_motions[:, :self.occupancy_horizon, :], 
             map_hw=self.bev_map_hw,
             x_min=self.xyz_range[0][0],
             x_max=self.xyz_range[0][1],
@@ -336,7 +337,7 @@ class WaymoDataset(Dataset):
 
 
     @check_perf
-    def _load_laser_labels(self, frame_dict: Dict[str, Any], obj_id_map: Dict[str, int]) -> torch.Tensor:
+    def _load_track_labels(self, frame_dict: Dict[str, Any], obj_id_map: Dict[str, int]) -> torch.Tensor:
         laser_labels_path = frame_dict["laser_labels_path"]
         laser_labels_list = load_pickle_file(laser_labels_path)
         detections = []
@@ -367,8 +368,11 @@ class WaymoDataset(Dataset):
         # shape: (1 + num_detections, 9)
         detections = torch.tensor(detections, dtype=torch.float32)
         vehicle_label = self.metadata["LABELS"]["DETECTION_LABEL_INDEXES"]["VEHICLE"]
+
+        # ego vehicle z-center is not at 0, since 0 corresponds to the ground level, instead 
+        # it is at a location equal to half of its height.
         ego_detections = torch.tensor(
-            [-1, *([0.0]*3), *self.ego_vehicle_dims, 0.0, vehicle_label], dtype=torch.float32
+            [-1, *([0.0]*2), self.ego_vehicle_dims[2] / 2, *self.ego_vehicle_dims, 0.0, vehicle_label], dtype=torch.float32
         )
         detections = torch.concat([ego_detections[None, :], detections], dim=0)
         return detections
@@ -451,20 +455,17 @@ class WaymoDataset(Dataset):
 
         polylines = torch.from_numpy(polylines)
         polyline_boxes = polyline_2_xywh(polylines, pad_vals)
-
-        # scale boxes
-        polyline_boxes[..., [0, 2]] /= self.bev_map_hw[1]
-        polyline_boxes[..., [1, 3]] /= self.bev_map_hw[0]
+        
         cls = torch.from_numpy(cls)
         boxes = torch.concat([polyline_boxes, cls], dim=-1)
         
         # polylines: (num_elements, num_points, 2)
         # boxes: (num_elements, 4 + 1)
-        return polylines, boxes
+        return polylines.long(), boxes.long()
     
 
     @check_perf
-    def _get_planning_trajectory(
+    def _get_ego_motions(
         self, 
         sample_dict: Dict[str, Any],
         frame_idx: int,
@@ -488,13 +489,13 @@ class WaymoDataset(Dataset):
         global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)
         global_positions = torch.from_numpy(global_positions).to(ego_pose.dtype)
-        ego_trajectory = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
+        ego_motions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
         # shape: (timesteps, 2)
-        return ego_trajectory[:, :2].to(dtype=torch.float32)
+        return ego_motions[:, :2].to(dtype=torch.float32)
     
 
     @check_perf
-    def _get_high_level_command(self, ego_trajectory: torch.Tensor) -> torch.Tensor:
+    def _get_high_level_command(self, ego_motions: torch.Tensor) -> torch.Tensor:
         # to get high level command of ego planning motion, compute the cross and dot products of the last
         # direction vector, relative to a reference vector. The reference vector in this case is [1.0, 0.0]
         # which corresponds to straight motion along the x axis, and the last direction vector is [xt - x0, yt - y0]
@@ -502,7 +503,7 @@ class WaymoDataset(Dataset):
         # [0, 0]. Next we compute the arctan2 between the cross and dot product, this is equivalent to computing the
         # arctan2 between the sin and cos of the angles between the two vectors.
         x0, y0 = 1.0, 0.0
-        xt, yt = ego_trajectory[min(self.planning_horizon, ego_trajectory.shape[0]) - 1]
+        xt, yt = ego_motions[min(self.planning_horizon, ego_motions.shape[0]) - 1]
 
         disp = torch.sqrt(xt.pow(2) + yt.pow(2))
         if disp < self.stop_command_disp_thresh:

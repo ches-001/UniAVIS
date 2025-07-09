@@ -284,7 +284,7 @@ class DeformableAttention(nn.Module):
         level_start_indexes = level_start_indexes.cumsum(dim=-1) - level_start_indexes
 
         if _MMCV_EXTENSION_IS_AVAILABLE and _CUDA_IS_AVAILABLE:
-            sample_locs = (sample_locs - 1) / 2
+            sample_locs = (sample_locs + 1) / 2
             output = _MMCVDeformableAttentionFunction.apply(
                 value, value_spatial_shapes, level_start_indexes, sample_locs, attn, self.im2col_steps
             )
@@ -506,7 +506,7 @@ class MultiViewDeformableAttention(DeformableAttention):
             attn        = attn.reshape(-1, *attn.shape[2:-2], all_points).contiguous()
             sample_locs = sample_locs.permute(0, 2, 1, 3, 4, 5, 6, 7)
             sample_locs = sample_locs.reshape(-1, *sample_locs.shape[2:-3], all_points, 2).contiguous()
-            sample_locs = (sample_locs - 1) / 2
+            sample_locs = (sample_locs + 1) / 2
             output      = _MMCVDeformableAttentionFunction.apply(
                 value, value_spatial_shapes, level_start_indexes, sample_locs, attn, self.im2col_steps
             )

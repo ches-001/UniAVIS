@@ -142,9 +142,9 @@ class PlanFormer(BaseFormer):
             self,
             commands: torch.LongTensor, 
             bev_features: torch.Tensor, 
-            track_queries: torch.Tensor, 
-            motion_queries: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            ego_track_query: torch.Tensor, 
+            ego_motion_query: torch.Tensor,
+        ) -> torch.Tensor:
         """
         Input
         --------------------------------
@@ -152,27 +152,25 @@ class PlanFormer(BaseFormer):
 
         :bev_features: (N, H_bev * W_bev, (C_bev or embed_dim)) Bird eye view features from BEVFormer
 
-        :track_queries: (N, embed_dim) Ego vehicle track queries from the TrackFormer
+        :ego_track_query: (N, embed_dim) Ego vehicle track queries from the TrackFormer
 
-        :motion_queries: (N, k, embed_dim), Ego vehicle motion queries from the MotionFormer"
+        :ego_motion_query: (N, k, embed_dim), Ego vehicle motion queries from the MotionFormer"
 
         Returns
         --------------------------------
-        :plan_queries: (N, embed_dim), PlanFormer / Planner final context query output
-
         :trajectories: (N, T, 2), batch of estimated trajectory of waypoints
                             Last dim corresponds to (x, y) of waypoints
         """
 
-        batch_size = track_queries.shape[0]
-        device     = track_queries.device
+        batch_size = ego_track_query.shape[0]
+        device     = ego_track_query.device
 
         commands_emb   = self.commands_emb()[0][commands.squeeze()][:, None, :]
         plan_pos_emb   = self.plan_pos_emb()
         bev_pos_emb    = self.bev_pos_emb(flatten=True)
         
-        track_queries  = track_queries[:, None, :]
-        plan_queries   = self.plan_queries_mlp(commands_emb + track_queries + motion_queries)
+        ego_track_query  = ego_track_query[:, None, :]
+        plan_queries   = self.plan_queries_mlp(commands_emb + ego_track_query + ego_motion_query)
         plan_queries   = plan_queries + plan_pos_emb
         bev_features   = bev_features + bev_pos_emb
 
@@ -196,7 +194,7 @@ class PlanFormer(BaseFormer):
         # the trajectory_mlp predicts (v x dt = dx) at each timestep and the cummulative sum 
         # gives us the position at each timestep. Converting to global frame is as simple as
         # transforming the predicted trajectories with information from the ego pose data.
-        trajectories = self.trajectory_mlp(plan_queries).reshape(batch_size, self.pred_horizon, 2)
-        trajectories = torch.cumsum(trajectories, dim=1)
+        planned_motion = self.trajectory_mlp(plan_queries).reshape(batch_size, self.pred_horizon, 2)
+        planned_motion = torch.cumsum(planned_motion, dim=1)
         
-        return plan_queries[:, 0, :], trajectories
+        return planned_motion

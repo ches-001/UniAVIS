@@ -350,7 +350,10 @@ class DetectionHead(nn.Module):
             nn.Linear(self.embed_dim, 6),
             nn.Sigmoid()
         )
-        self.angle_module = nn.Linear(self.embed_dim, 1)
+        self.angle_module = nn.Sequential(
+            nn.Linear(self.embed_dim, 1),
+            nn.Tanh()
+        )
         self.cls_module   = nn.Linear(self.embed_dim, self.num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

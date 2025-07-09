@@ -163,7 +163,7 @@ class TrackFormer(BaseFormer):
             self, 
             bev_features: torch.Tensor, 
             track_queries: Optional[torch.Tensor]=None,
-            track_queries_mask: Optional[torch.BoolTensor]=None,
+            track_queries_mask: Optional[torch.Tensor]=None,
         ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
 
         """
@@ -187,7 +187,7 @@ class TrackFormer(BaseFormer):
         ---------------------------------
             ego_query     (N, embed_dim)
             
-            mode_scores   (N, det_params)
+            ego_detections   (N, det_params)
         """
         assert bev_features.shape[-1] == self.embed_dim
 
@@ -247,3 +247,34 @@ class TrackFormer(BaseFormer):
         detections = detections[..., 1:, :]
         
         return queries, detections, ego_data
+    
+    @staticmethod
+    def preds2scale(
+        preds: torch.Tensor, 
+        xyz_range: Tuple[Tuple[float, float], Tuple[float, float]],
+        angle_range: Tuple[float, float]
+    ) -> torch.Tensor:
+        
+        """Expects detections of shape (..., d) with d corresponding to [x, y, z, l, w, h, angle, cls_data]"""
+        box_min = torch.tensor([
+            xyz_range[0][0], 
+            xyz_range[1][0], 
+            xyz_range[2][0], 
+            xyz_range[0][0], 
+            xyz_range[1][0], 
+            xyz_range[2][0]
+        ], device=preds.device)
+
+        box_max = torch.tensor([
+            xyz_range[0][1], 
+            xyz_range[1][1], 
+            xyz_range[2][1], 
+            xyz_range[0][1], 
+            xyz_range[1][1], 
+            xyz_range[2][1]
+        ], device=preds.device)
+        
+        boxes_xyz = ((box_max - box_min) * preds[..., :3]) + box_min
+        boxes_lwh = preds[..., 3:6] * (box_max - box_min)
+        angles  = ((angle_range[1] - angle_range[0]) * (preds[..., [6]] + 1) / 2) + angle_range[0]
+        return torch.concat([boxes_xyz, boxes_lwh, angles, preds[..., 7:]], dim=-1)

@@ -20,52 +20,50 @@ class PlanLoss(nn.Module):
 
         weight_tilda_pair: weight and pad value pair (w, tilda) for collision loss. For each pair, the multi-agent boxes
             are spaced by the corresponding tilda value and a weighted sum of each is performeed, with w as weights
-            default values of tilda (0.0, 0.5 and 1.0) are scaled from range (-51.2, 51.2) to range (0, 1). 
-            Do change these values accordingly if you decide to stick to another range
         """
         self.dist_lambda = dist_lambda
         self.col_lambda = col_lambda
-        self.weight_tilda_pair = weight_tilda_pair or [(1.0, 0.0), (0.4, 0.0048828125), (0.1, 0.009765625)]
+        self.weight_tilda_pair = weight_tilda_pair or [(1.0, 0.0), (0.4, 0.5), (0.1, 1.0)]
 
 
     def forward(
             self, 
-            pred_ego_traj: torch.Tensor, 
-            target_ego_traj: torch.Tensor,
-            pred_ego_box_size: torch.Tensor,
-            multiagent_box_sizes: torch.Tensor,
-            multiagents_trajs: torch.Tensor,
+            pred_motion: torch.Tensor, 
+            target_motion: torch.Tensor,
+            ego_size: torch.Tensor,
+            multiagent_size: torch.Tensor,
+            multiagents_motions: torch.Tensor,
             transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
-        pred_ego_traj: (N, T, 2), predicted trajectory (x, y)
+        pred_motion: (N, T, 2), predicted trajectory (x, y)
 
-        target_ego_traj: (N, T, 2), target trajectory (x, y)
+        target_motion: (N, T, 2), target trajectory (x, y)
 
-        pred_ego_box_size: (N, 2) box size (w, h) of ego vehicle
+        ego_size: (N, 2) box size (w, h) of ego vehicle
 
-        multiagent_box_sizes: (N, num_agents, 2), box sizes (w, h) of other agents (no ego trajectory)
+        multiagent_size: (N, num_agents, 2), box sizes (w, h) of other agents (no ego trajectory)
 
-        multiagents_trajs: (N, num_agents, T, 2), trajectory of other agents (no ego trajectory)
+        multiagents_motions: (N, num_agents, T, 2), trajectory of other agents (no ego trajectory)
             NOTE: This trajectory must be in ego (scene-level) vehicle frame
 
         transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
-            if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
+            if this is None, the function assumes that the multiagents_motions is already projected to scene level.
         """
-        device = pred_ego_traj.device
-        num_timesteps = pred_ego_traj.shape[1]
+        device = pred_motion.device
+        num_timesteps = pred_motion.shape[1]
         num_tildas = len(self.weight_tilda_pair)
 
-        valid_traj_point_mask = (target_ego_traj != -999).all(dim=-1)
+        valid_traj_point_mask = (target_motion != -999).all(dim=-1)
 
-        dist_loss = (pred_ego_traj - target_ego_traj).pow(2).sum(dim=-1).sqrt()
+        dist_loss = (pred_motion - target_motion).pow(2).sum(dim=-1).sqrt()
         dist_loss = dist_loss[valid_traj_point_mask].mean()
 
-        pred_ego_box_size = pred_ego_box_size[:, None, :].tile(1, num_timesteps, 1)
-        ego_box_traj = torch.concat([pred_ego_traj, pred_ego_box_size], dim=-1)
+        ego_size = ego_size[:, None, :].tile(1, num_timesteps, 1)
+        ego_box_traj = torch.concat([pred_motion, ego_size], dim=-1)
         ego_box_traj = ego_box_traj[:, None, None, :, :]
 
-        weights_and_tilda = torch.tensor(self.weight_tilda_pair, dtype=multiagent_box_sizes.dtype, device=device)
+        weights_and_tilda = torch.tensor(self.weight_tilda_pair, dtype=multiagent_size.dtype, device=device)
         weights = weights_and_tilda[None, None, :, 0]
         tildas = weights_and_tilda[None, None, :, 1, None, None]
         
@@ -74,13 +72,13 @@ class PlanLoss(nn.Module):
                 transform.shape[-1] == 4 and
                 transform.shape[-2] == transform.shape[-1]
             )
-            multiagents_trajs = transform_points(multiagents_trajs, transform_matrix=transform)
+            multiagents_motions = transform_points(multiagents_motions, transform_matrix=transform)
 
-        multiagent_box_sizes = multiagent_box_sizes[:, :, None, :].tile(1, 1, num_timesteps, 1)
-        multiagent_box_sizes = multiagent_box_sizes[:, :, None, :, :] + tildas
-        multiagents_trajs = multiagents_trajs[:, :, None, :, :].tile(1, 1, num_tildas, 1, 1)
+        multiagent_size = multiagent_size[:, :, None, :].tile(1, 1, num_timesteps, 1)
+        multiagent_size = multiagent_size[:, :, None, :, :] + tildas
+        multiagents_motions = multiagents_motions[:, :, None, :, :].tile(1, 1, num_tildas, 1, 1)
 
-        multiagent_box_traj = torch.concat([multiagents_trajs, multiagent_box_sizes], dim=-1)
+        multiagent_box_traj = torch.concat([multiagents_motions, multiagent_size], dim=-1)
 
         col_loss = self._collision_loss(ego_box_traj, multiagent_box_traj, weights, valid_traj_point_mask)
         col_loss = col_loss.mean()

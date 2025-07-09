@@ -52,10 +52,10 @@ class MotionFormerDecoderLayer(nn.Module):
             self, 
             bev_features: torch.Tensor,
             queries: torch.Tensor,
-            agent_queries: torch.Tensor, 
+            track_queries: torch.Tensor, 
             map_queries: torch.Tensor,
             ref_points: torch.Tensor,
-            agent_pad_mask: Optional[torch.Tensor]=None,
+            track_pad_mask: Optional[torch.Tensor]=None,
             agent_agent_attn_mask: Optional[torch.Tensor] = None,
             agent_map_attn_mask: Optional[torch.Tensor] = None,
             agent_bev_attn_mask: Optional[torch.Tensor] = None
@@ -69,13 +69,13 @@ class MotionFormerDecoderLayer(nn.Module):
         :queries: (N, k, num_agents, embed_dim), context query from previous layer + corresponding positional embedding
                  (k = num_modes or number of modes)
 
-        :agent_queries: (N, 1, num_agents, embed_dim) Agent queries from the TrackFormer network
+        :track_queries: (N, 1, num_agents, embed_dim) Agent queries from the TrackFormer network
 
         :map_queries: (N, 1, num_map_elements, embed_dim) Map queries from the Mapformer network
 
         :ref_points: (N, k, num_agents, 1, 2), reference points for the deformable attention
 
-        :agent_pad_mask: bool type (N, 1, num_agents), bool padding mask for agent queries (0 if pad value, else 1):
+        :track_pad_mask: bool type (N, 1, num_agents), bool padding mask for agent queries (0 if pad value, else 1):
 
         :agent_agent_attn_mask: bool type (N, 1, num_agents, num_agents) (0 if pad value, else 1):
 
@@ -87,8 +87,8 @@ class MotionFormerDecoderLayer(nn.Module):
         --------------------------------
         output: (N, k, num_agents, embed_dim), output queries to be fed into the next layer
         """
-        if agent_pad_mask is not None:
-            assert agent_pad_mask.dtype == torch.bool
+        if track_pad_mask is not None:
+            assert track_pad_mask.dtype == torch.bool
 
         if agent_agent_attn_mask is not None:
             assert agent_agent_attn_mask.dtype == torch.bool
@@ -105,12 +105,12 @@ class MotionFormerDecoderLayer(nn.Module):
             queries, 
             attention_mask=agent_agent_attn_mask
         )
-        self_attn_queries  = self.self_addnorm(self_attn_queries, self._apply_mask(queries, agent_pad_mask))
+        self_attn_queries  = self.self_addnorm(self_attn_queries, self._apply_mask(queries, track_pad_mask))
 
         agent_ctx_queries  = self.agent_cross_attention(
             self_attn_queries, 
-            agent_queries, 
-            agent_queries, 
+            track_queries, 
+            track_queries, 
             attention_mask=agent_agent_attn_mask
         )
         agent_ctx_queries  = self.agent_cross_addnorm(agent_ctx_queries, self_attn_queries)
@@ -234,10 +234,10 @@ class MotionFormer(BaseFormer):
             agent_anchors: torch.Tensor,
             bev_features: torch.Tensor,
             ego_query: torch.Tensor,
-            agent_queries: torch.Tensor,
+            track_queries: torch.Tensor,
             map_queries: torch.Tensor,
             transform: torch.Tensor,
-            agent_pad_mask: Optional[torch.Tensor]=None,
+            track_pad_mask: Optional[torch.Tensor]=None,
             map_pad_mask: Optional[torch.Tensor]=None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
 
@@ -252,7 +252,7 @@ class MotionFormer(BaseFormer):
 
         :ego_query: (N, embed_dim), ego vehicle queries from the TrackFormer
 
-        :agent_queries: (N, num_agents, embed_dim) Agent queries from the TrackFormer network 
+        :track_queries: (N, num_agents, embed_dim) Agent queries from the TrackFormer network 
             (num_agents = max number of agents)
 
         :map_queries: (N, num_map_elements, embed_dim) Map queries from the MapFormer network 
@@ -263,9 +263,9 @@ class MotionFormer(BaseFormer):
             NOTE: Scene level coordinate in this case refers to coordinates of ego-vehicle, as in the BEV
             scene, The ego vehicle center is the reference point
         
-        :agent_pad_mask: (N, num_agents), bool padding mask for invalid agent queries (0 if pad value, else 1):
+        :track_pad_mask: (N, num_agents), bool padding mask for invalid agent queries (0 if pad value, else 1):
 
-        :agent_pad_mask: (N, num_map_elements), bool padding mask for invalid map element queriess (0 if pad value, else 1):
+        :map_pad_mask: (N, num_map_elements), bool padding mask for invalid map element queriess (0 if pad value, else 1):
 
         Returns
         --------------------------------
@@ -297,26 +297,26 @@ class MotionFormer(BaseFormer):
         ego_current_pos    = torch.zeros_like(agent_current_pos[:, [0], :])
         agent_current_pos  = torch.concat([ego_current_pos, agent_current_pos], dim=1)
 
-        agent_queries      = torch.concat([ego_query[:, None, :], agent_queries], dim=1)
+        track_queries      = torch.concat([ego_query[:, None, :], track_queries], dim=1)
 
         ego_transform      = torch.eye(transform.shape[-1], device=device)
         ego_transform      = ego_transform[None, None, :, :].tile(batch_size, 1, 1, 1)
         transform = torch.concat([transform, ego_transform], dim=1)
 
-        if agent_pad_mask is not None:
-            agent_pad_mask = torch.concat([
-                torch.ones_like(agent_pad_mask[:, [0]]), agent_pad_mask
+        if track_pad_mask is not None:
+            track_pad_mask = torch.concat([
+                torch.ones_like(track_pad_mask[:, [0]]), track_pad_mask
             ], dim=1)
-            agent_pad_mask = agent_pad_mask[:, None, ...]
+            track_pad_mask = track_pad_mask[:, None, ...]
 
         if map_pad_mask is not None:
             map_pad_mask = map_pad_mask[:, None, ...]
 
-        num_agents        = agent_queries.shape[1]
+        num_agents        = track_queries.shape[1]
         num_map_elements  = map_queries.shape[1]
         agent_pos_indexes = torch.arange(num_agents, device=device)[None, None, :].tile(batch_size, 1, 1)
         map_pos_indexes   = torch.arange(num_map_elements, device=device)[None, None, :].tile(batch_size, 1, 1)
-        agent_queries     = self.agent_query_mlp(agent_queries[:, None, :, :] + self.agent_query_pos_emb(agent_pos_indexes))
+        track_queries     = self.agent_query_mlp(track_queries[:, None, :, :] + self.agent_query_pos_emb(agent_pos_indexes))
         map_queries       = self.map_query_mlp(map_queries[:, None, :, :] + self.map_query_pos_emb(map_pos_indexes))
         
         # scene level anchors:
@@ -352,13 +352,13 @@ class MotionFormer(BaseFormer):
         agent_map_attn_mask   = None
         agent_bev_attn_mask   = None
 
-        if agent_pad_mask is not None:
-            agent_agent_attn_mask = agent_pad_mask[..., None] & agent_pad_mask[..., None, :]
-            agent_bev_attn_mask   = agent_pad_mask[..., None].tile(1, self.num_modes, 1, 1)
+        if track_pad_mask is not None:
+            agent_agent_attn_mask = track_pad_mask[..., None] & track_pad_mask[..., None, :]
+            agent_bev_attn_mask   = track_pad_mask[..., None].tile(1, self.num_modes, 1, 1)
             agent_bev_attn_mask   = agent_bev_attn_mask.flatten(start_dim=1, end_dim=2)
         
         if map_pad_mask is not None:
-            agent_map_attn_mask = agent_pad_mask[..., None] & map_pad_mask[..., None, :]
+            agent_map_attn_mask = track_pad_mask[..., None] & map_pad_mask[..., None, :]
         
         agent_goal_pos = scene_anchors[..., None, :]
 
@@ -371,10 +371,10 @@ class MotionFormer(BaseFormer):
             ctx_queries = self.decoder_modules[i](
                 bev_features=bev_features,
                 queries=queries,
-                agent_queries=agent_queries, 
+                track_queries=track_queries, 
                 map_queries=map_queries,
                 ref_points=ref_points,
-                agent_pad_mask=agent_pad_mask,
+                track_pad_mask=track_pad_mask,
                 agent_agent_attn_mask=agent_agent_attn_mask,
                 agent_map_attn_mask=agent_map_attn_mask,
                 agent_bev_attn_mask=agent_bev_attn_mask
@@ -408,3 +408,21 @@ class MotionFormer(BaseFormer):
         mode_traj   = mode_traj[:, 1:, ...]
         mode_scores = mode_scores[:, 1:, ...] 
         return ctx_queries, mode_traj, mode_scores, ego_data
+    
+    @staticmethod
+    def create_agent2scene_transforms(angles: torch.Tensor, locs: torch.Tensor) -> torch.Tensor:
+        """
+        This creates a matrix for transforming from agent-level coordinate to scene (ego) level coordinates
+        """
+        angle_cos = torch.cos(angles)
+        angle_sin = torch.sin(angles)
+        zeros     = torch.zeros_like(angle_cos)
+        ones      = torch.ones_like(angle_cos)
+        transform = torch.stack([
+            angle_cos, angle_sin, zeros, locs[..., 0],
+            -angle_sin, angle_cos, zeros, locs[..., 1],
+            zeros, zeros, ones, locs[..., 2],
+            zeros, zeros, zeros, ones
+        ], dim=-1)
+        transform = torch.unflatten(transform, dim=-1, sizes=(4, 4))
+        return transform

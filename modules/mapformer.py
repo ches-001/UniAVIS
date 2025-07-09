@@ -14,6 +14,15 @@ from utils.img_utils import xyxy_to_xywh
 from typing import Optional, Tuple, Union
 
 
+class Box2ScaleStaticMethodMixin:
+    @staticmethod
+    def boxes2scale(dets: torch.Tensor, wh: Tuple[int, int]) -> torch.Tensor:
+        """Expects boxes of shape (..., d) with d corresponding to [x, y, w, h, ...]"""
+        box_max = torch.tensor([wh[0], wh[1], wh[0], wh[1]], device=dets.device)
+        boxes   = box_max * dets[..., :4]
+        return torch.concat([boxes, dets[..., 4:]], dim=-1)
+    
+
 class VectorMapKeypointDecoderLayer(TrackFormerDecoderLayer):
     def __init__(self, *args, **kwargs):
         super(VectorMapKeypointDecoderLayer, self).__init__(*args, **kwargs)
@@ -114,7 +123,7 @@ class PolyLineGeneratorLayer(nn.Module):
         return ctx_queries
 
 
-class VectorMapFormer(BaseFormer):
+class VectorMapFormer(Box2ScaleStaticMethodMixin, BaseFormer):
     """
     This is an implementation of the transformer decoder in the VectorMapNet (https://arxiv.org/pdf/2206.08920), this
     architecture predicts polylines for segments rather than a rasterized map.
@@ -198,17 +207,18 @@ class VectorMapFormer(BaseFormer):
         self.bbox_kp_head       = SimpleMLP(self.embed_dim, 2, self.dim_feedforward, final_activation=nn.Sigmoid())
         self.bbox_class_head    = SimpleMLP(self.embed_dim*self.num_bbox_kps, self.num_classes, self.dim_feedforward)
         self.polyline_generator = self._create_polyline_pred_layers()
-    
-    def _get_ref_points_from_keypoints(self, kps: torch.Tensor, dequantize: bool) -> torch.Tensor:
-        if dequantize:
-            kps = kps / (max(self.bev_feature_hw) - 1)
+
+    def _get_ref_points_from_keypoints(self, kps: torch.Tensor) -> torch.Tensor:
         wh   = (kps[..., 1, :] - kps[..., 0, :]).abs()
         c_xy = kps[..., 0, :] + (wh / 2)
         c_xy = (2 * c_xy) - 1
         return c_xy[..., None, :]
 
-    def _quantize_kps(self, kps: torch.Tensor) -> torch.LongTensor:
-        return (kps * (max(self.bev_feature_hw) - 1)).detach().long()
+    def _quantize_kps(self, kps: torch.Tensor, bev_wh: torch.Tensor) -> torch.Tensor:
+        return (kps.detach() * (bev_wh - 1)).long()
+
+    def _dequantize_kps(self, kps: torch.Tensor, bev_wh: torch.Tensor) -> torch.Tensor:
+        return kps.detach() / (bev_wh - 1)
     
     def _make_casual_mask(self, *shape: int, device: Union[int, str, torch.device]):
         mask = torch.ones(*shape, dtype=torch.bool, device=device)
@@ -263,14 +273,15 @@ class VectorMapFormer(BaseFormer):
     def forward(
             self, 
             bev_features: torch.Tensor,
-            tgt_kps: Optional[torch.LongTensor]=None,
-            tgt_classes: Optional[torch.LongTensor]=None,
-            tgt_vertices: Optional[torch.LongTensor]=None,
+            tgt_kps: Optional[torch.Tensor]=None,
+            tgt_classes: Optional[torch.Tensor]=None,
+            tgt_vertices: Optional[torch.Tensor]=None,
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Input
         --------------------------------
         :tgt_kps: (N, max_elements, k, 2) Target keypoints for the map element box
+            Expected to be quantized to range from x \in [0, W] and y \in [0, H]
 
         :tgt_classes: (N, max_elements), Target class labels for each map element
 
@@ -288,10 +299,18 @@ class VectorMapFormer(BaseFormer):
         :polylines | polyline_logits: (N, num_elements, num_vertices, 2) | (N, num_elements, num_vertices, 2, num_grid),
             Contains either class labels of class logits depending on whether inference mode has been set or not 
             
-        :detections: (N, num_elements, (num_kp * 2) + num_classes), this is a combination of predicted box keypoints 
+        :boxes: (N, num_elements, (num_kp * 2) + num_classes), this is a combination of predicted box keypoints 
             and class logits
         """
+        if tgt_kps is not None:
+            assert tgt_kps.dtype == torch.int64
 
+        if tgt_classes is not None:
+            assert tgt_classes.dtype == torch.int64
+
+        if tgt_vertices is not None:
+            assert tgt_vertices.dtype == torch.int64
+            
         batch_size = bev_features.shape[0]
         device     = bev_features.device
 
@@ -319,12 +338,15 @@ class VectorMapFormer(BaseFormer):
         # box_kps_emb      : (1, 1, 2, 1, d)
         # seq_emb          : (N, 1, v, 1, d)
         # pline_vertex_emb : (N, max_elements, v, 2, d)
+
+        bev_wh = torch.tensor([self.bev_feature_hw[1], self.bev_feature_hw[0]], dtype=bev_features.dtype, device=device)
+
         if tgt_kps is not None:
-            ref_points     = self._get_ref_points_from_keypoints(tgt_kps, dequantize=True)
+            ref_points     = self._get_ref_points_from_keypoints(self._dequantize_kps(tgt_kps))
             kps_vertex_emb = self.grid_value_emb(tgt_kps)
         else:
-            ref_points     = self._get_ref_points_from_keypoints(bbox_kps, dequantize=False)
-            kps_vertex_emb = self.grid_value_emb(self._quantize_kps(bbox_kps))
+            ref_points     = self._get_ref_points_from_keypoints(bbox_kps)
+            kps_vertex_emb = self.grid_value_emb(self._quantize_kps(bbox_kps, bev_wh))
 
         if tgt_classes is not None:
             class_embs = self.class_emb(tgt_classes)
@@ -348,16 +370,16 @@ class VectorMapFormer(BaseFormer):
 
         bbox_kps = torch.flatten(bbox_kps, start_dim=2, end_dim=3)
         bbox_xywh = xyxy_to_xywh(bbox_kps)
-        detections = torch.concat([bbox_xywh, class_logits], dim=-1)
+        boxes = torch.concat([bbox_xywh, class_logits], dim=-1)
         if not self.inference_mode:
             assert tgt_vertices is not None
             map_queries, polyline_logits = self._train_forward(
                 input_queries, tgt_vertices, bev_features, coord_emb, ref_points
             )
-            return map_queries, polyline_logits, detections
+            return map_queries, polyline_logits, boxes
         else:
             map_queries, polylines = self._inference_forward(input_queries, bev_features, coord_emb, ref_points)
-            return map_queries, polylines, detections
+            return map_queries, polylines, boxes
         
     def _train_forward(
             self, 
@@ -450,7 +472,7 @@ class VectorMapFormer(BaseFormer):
         return map_queries, polylines
 
 
-class RasterMapFormer(TrackFormer):
+class RasterMapFormer(Box2ScaleStaticMethodMixin, TrackFormer):
     """
     This is not a standard panoptic segformer like the one in this Segformer paper (https://arxiv.org/pdf/2109.03814),
     this is a custom designed architecture that combines deformable DETR decoder (https://arxiv.org/pdf/2010.04159)
@@ -488,7 +510,7 @@ class RasterMapFormer(TrackFormer):
         --------------------------------
         :queries: (N, num_queries, embed_dim) context queries for each map element from the last decoder layer
 
-        :protos: (k, H_bev, W_bev), where k is the number of segmentation coefficients. 
+        :protos: (N, k, H_bev, W_bev), where k is the number of segmentation coefficients. 
             NOTE: This tensor is usually matrix multiplied with the k coefficient queries of n objects:
             (n, k) x (k, H_bev, W_bev) to produce an output of shape (n, H_bev, W_bev). The reason this
             multiplication is not done in this forward method is because a lot of predictions will be 
