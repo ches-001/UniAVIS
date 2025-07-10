@@ -32,12 +32,14 @@ class E2ETrainer(BaseTrainer):
         occ_lossfn: Optional[OccLoss]=None,
         planformer: Optional[PlanFormer]=None,
         plan_lossfn: Optional[PlanLoss]=None,
-        checkpoint_path: Optional[str]=None,
+        lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]=None,
+        lr_scheduler_step: int=10,
+        checkpoints_path: Optional[str]=None,
         device_or_rank: Union[int, str]="cpu",
         ddp_mode: bool=False,
-        config_or_path: Optional[str]=None
+        config_or_path: Optional[Union[str, Dict[str, Any]]]=None
     ):
-        super(E2ETrainer, self).__init__(ddp_mode, device_or_rank)
+        super(E2ETrainer, self).__init__(ddp_mode, device_or_rank, checkpoints_path, config_or_path)
 
         self._set_module(bevformer, "bevformer", is_model=True)
         self._set_module(trackformer, "trackformer", is_model=True)
@@ -53,59 +55,34 @@ class E2ETrainer(BaseTrainer):
         self._set_module(plan_lossfn, "plan_lossfn", is_model=False)
 
         self.optimizer = optimizer
-
-        self.config = load_yaml_file(config_or_path) if isinstance(config_or_path, str) else config_or_path
+        self.lr_scheduler = lr_scheduler
+        self.lr_scheduler_step = lr_scheduler_step
         self.last_epoch = 0
-        self.checkpoints_dir = os.path.join(self.checkpoints_dir, str(int(time.time())))
 
-        self._save_config_copy(config_or_path, to_checkpoint_dir=True)
-        self._save_config_copy(config_or_path, to_checkpoint_dir=False)
-
-        # load checkpoint if any
-        if checkpoint_path:
-            self.load_checkpoint(checkpoint_path)
-    
-
-    def _save(self, path: str, snapshot_mode: bool=True):
-        pass
-    
-
-    def _save_config_copy(self, config_path: str, to_checkpoint_dir: bool):
-        pass
-
-
-    def save_best_model(self):
-        # If DDP mode, we only need to ensure that the model is only being saved at
-        # rank-0 device. It does not neccessarily matter the rank, as long as the
-        # model saving only happens on one rank only (one device) since the model
-        # is exactly the same across all
-        pass
-
-
-    def save_checkpoint(self):
-        # similar to the `save_best_model` method, the model for only one device needs
-        # to be saved.
-        pass
-    
-
-    def load_checkpoint(self, path: str) -> Dict[str, Any]:
-        # if DDP mode, we do not need to only do this for rank-0 devices but
-        # across all devices to ensure that the model and optimizer states 
-        # begin at same point
-        pass
+        # load checkpoints if any
+        if self.checkpoints_path:
+            self.load_checkpoints(self.checkpoints_path)
     
 
     def train(self, dataloader: DataLoader, verbose: bool=False) -> Dict[str, float]:
-        result = self.step(dataloader, "train", verbose)
-        if self.lr_scheduler and (self.last_epoch % self.lr_schedule_interval == 0):
+        metrics = self.step(dataloader, "train", verbose)
+        self._train_metrics.append(metrics)
+
+        if self.lr_scheduler and (self.last_epoch % self.lr_scheduler_step == 0):
             self.lr_scheduler.step()
+            if verbose:
+                lr = self.lr_scheduler.optimizer.param_groups[0]["lr"]
+                print(f"Current LR: {lr :.6f}")
         self.last_epoch += 1
-        return result
+
+        return metrics
         
 
     def evaluate(self, dataloader: DataLoader, verbose: bool=False) -> Dict[str, float]:        
         with torch.no_grad():
-            return self.step(dataloader, "eval", verbose)
+            metrics = self.step(dataloader, "eval", verbose)
+        self._eval_metrics.append(metrics)
+        return metrics
 
 
     def step(self, dataloader: DataLoader, mode: str, verbose: bool=False) -> Dict[str, float]:
@@ -126,11 +103,7 @@ class E2ETrainer(BaseTrainer):
             # the top and the first (rank 0) at the bottom. This is because the
             # first rank will be the one logging all the metrics
             world_size = int(os.environ["WORLD_SIZE"])
-            position = (
-                self.device_or_rank 
-                if not isinstance(self.device_or_rank, str) else 
-                int(self.device_or_rank.replace("cuda:", ""))
-            )
+            position = self.device_or_rank
             position = abs(position - (world_size - 1))
             pbar = tqdm.tqdm(enumerate(dataloader), position=position)
         else:
@@ -142,33 +115,22 @@ class E2ETrainer(BaseTrainer):
 
         avg_track_loss, avg_map_loss, avg_motion_loss, avg_occ_loss, avg_plan_loss = [0.0] * 5
 
-        for count, sample_batch in pbar:
-            self._zero_module_grads("bevformer")
-            self._zero_module_grads("trackformer")
-            self._zero_module_grads("mapformer")
-            self._zero_module_grads("motionformer")
-            self._zero_module_grads("occformer")
-            self._zero_module_grads("planformer")
-
-            imgs = sample_batch.cam_views
-            lidar_points = sample_batch.point_cloud
-            ego_poses = sample_batch.ego_pose
+        for step, sample_batch in pbar:
+            t_frames = sample_batch.cam_views.shape[1]
             cam_projections = sample_batch.cam_intrinsic @ torch.linalg.inv(sample_batch.cam_extrinsic)[..., :3, :]
-
-            ego_track_labels = sample_batch.tracks[:, 0]
-            track_labels = sample_batch.tracks[:, 1:]
-            map_box_labels = sample_batch.map_elements_boxes
-            map_tgt_polylines = sample_batch.map_elements_polylines
 
             bev_features, track_queries, track_mask, track_ids = [None] * 4
             track_loss, map_loss, motion_loss, occ_loss, plan_loss = [0.0] * 5
             
-            for tidx in range(0, imgs.shape[1]):
-                t_imgs = imgs[:, tidx]
-                t_lidar = lidar_points[:, tidx]
+            self.optimizer.zero_grad()
+
+            for tidx in range(0, t_frames):
+                t_imgs = sample_batch.cam_views[:, tidx]
+                t_lidar = sample_batch.point_cloud[:, tidx]
                 t_cam_projections = cam_projections[:, tidx]
                 if bev_features is not None:
-                    transition = torch.linalg.inv(ego_poses[:, tidx]) @ ego_poses[:, tidx - 1]
+                    transition = torch.linalg.inv(sample_batch.ego_pose[:, tidx]) @ sample_batch.ego_pose[:, tidx - 1]
+
 
                 bev_features = self.bevformer.forward(
                     imgs=t_imgs,
@@ -177,6 +139,9 @@ class E2ETrainer(BaseTrainer):
                     transition=transition,
                     bev_histories=bev_features
                 )
+
+                ego_track_labels = sample_batch.tracks[:, tidx, 0]
+                track_labels = sample_batch.tracks[:, tidx, 1:]
 
                 if hasattr(self, "trackformer"):
                     track_queries, track_preds, track_ego_data = self.trackformer.forward(
@@ -204,7 +169,11 @@ class E2ETrainer(BaseTrainer):
                             ego_targets=ego_track_labels,
                             prev_track_ids=track_ids
                         )
-                        track_loss = track_loss + (t_track_loss / imgs.shape[1])
+                        track_loss = track_loss + (t_track_loss / t_frames)
+                        avg_track_loss += track_loss
+
+            map_box_labels = sample_batch.map_elements_boxes
+            map_tgt_polylines = sample_batch.map_elements_polylines
 
             if hasattr(self, "mapformer"):
                 bev_wh = (self.mapformer.bev_feature_hw[1], self.mapformer.bev_feature_hw[0])
@@ -223,6 +192,7 @@ class E2ETrainer(BaseTrainer):
                                 target_detections=map_box_labels.float()
                             )
                             map_loss = map_loss + (l_map_loss / pred_map_boxes.shape[0])
+                            avg_map_loss += map_loss
 
                 elif isinstance(self.mapformer, VectorMapFormer):
                     assert isinstance(self.map_lossfn, VectorMapLoss)
@@ -244,6 +214,7 @@ class E2ETrainer(BaseTrainer):
                             target_polylines=map_tgt_polylines,
                             target_detections=map_box_labels.float()
                         )
+                        avg_map_loss += map_loss
                 else:
                     raise Exception(f"Invalid mapformer type {type(self.mapformer)}")
 
@@ -260,7 +231,6 @@ class E2ETrainer(BaseTrainer):
 
                 motion_queries, pred_motions, mode_scores, ego_motion_data = self.motionformer.forward(
                     agent_current_pos=track_preds[..., :2],
-                    agent_anchors=..., # TODO need to set this somehow
                     bev_features=bev_features,
                     ego_query=ego_track_query,
                     track_queries=track_queries,
@@ -290,6 +260,7 @@ class E2ETrainer(BaseTrainer):
                         ego_target_motions=ego_target_motions,
                         transform=agent2scene_transform
                     )
+                    avg_motion_loss += motion_loss
 
             if hasattr(self, "occformer"):
                 pred_occ, pred_occ_attn_mask = self.occformer.forward(
@@ -305,6 +276,7 @@ class E2ETrainer(BaseTrainer):
                     occ_loss = self.occ_lossfn.forward(
                         pred_occ=pred_occ, attn_mask=pred_occ_attn_mask, target_occ=target_occ
                     )
+                    avg_occ_loss += occ_loss
 
             if hasattr(self, "planformer"):
                 commands = sample_batch.command
@@ -321,18 +293,38 @@ class E2ETrainer(BaseTrainer):
 
                     plan_loss = self.plan_lossfn.forward(
                         pred_motion=pred_plan_motion,
-                        target_motion=target_plan_motion, 
+                        target_motion=target_plan_motion,
                         ego_size=ego_track_labels[..., 4:6],
-                        multiagent_size=track_preds[..., 3:5],
-                        multiagents_motions=..., # TODO, did not account for multimodal trajectory
-                        transform=agent2scene_transform
+                        multiagent_size=track_labels[..., 4:6],
+                        multiagents_motions=target_motions,
+                        transform=None
                     )
+                    avg_plan_loss += plan_loss
 
             loss = track_loss + map_loss + motion_loss + occ_loss + plan_loss
             
             loss.backward()
             self.optimizer.step()
-        return metrics
-    
 
-    
+        metrics = {
+            "track_loss": avg_track_loss, 
+            "map_loss": avg_map_loss, 
+            "motion_loss": avg_motion_loss, 
+            "occ_loss": avg_occ_loss,
+            "plan_loss": avg_plan_loss, 
+        }
+        
+        for k in metrics:
+            if isinstance(metrics[k], torch.Tensor):
+                metrics[k] = metrics[k].item()
+            metrics[k] /= (step + 1)
+
+        if self.ddp_mode:
+            metrics = ddp_sync_metrics(metrics, self.device_or_rank)
+
+        if verbose:
+            log_msg = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+            time = datetime.strftime(datetime.now(), "%d/%m/%Y %H:%M:%S")
+            print(f"[Step {step} @ {time}] {log_msg}")
+            
+        return metrics

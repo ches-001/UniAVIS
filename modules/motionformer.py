@@ -227,11 +227,19 @@ class MotionFormer(BaseFormer):
 
             ) for _ in range(0, self.num_layers)
         ])
+    
+    def set_agent_anchors(self, agent_anchors: torch.Tensor):
+        """
+        Input
+        --------------------------------
+        :agent_anchors: (K, 2) a cluster of agent level trajectory endpoints for K-modalities, 
+        """
+        assert agent_anchors.shape[0] == self.num_modes
+        self.register_buffer("agent_anchors", agent_anchors)
 
     def forward(
             self, 
             agent_current_pos: torch.Tensor,
-            agent_anchors: torch.Tensor,
             bev_features: torch.Tensor,
             ego_query: torch.Tensor,
             track_queries: torch.Tensor,
@@ -240,13 +248,10 @@ class MotionFormer(BaseFormer):
             track_pad_mask: Optional[torch.Tensor]=None,
             map_pad_mask: Optional[torch.Tensor]=None
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-
         """
         Input
         --------------------------------
         :agent_current_pos: (N, num_agents, 2) batch of current positions of multiple agents
-
-        :agent_anchors: (K, 2) a cluster of agent level trajectory endpoints for K-modalities, 
 
         :bev_features: (N, H_bev * W_bev, embed_dim) Bird eye view features from BEVFormer
 
@@ -286,11 +291,11 @@ class MotionFormer(BaseFormer):
             
             mode_scores   (N, k)
         """
+        assert hasattr(self, "agent_anchors")
         assert transform.shape[-1] == 4
         assert transform.shape[-2] == transform.shape[-1]
         
         batch_size = bev_features.shape[0]
-        k          = agent_anchors.shape[0]
         device     = bev_features.device
 
         # include ego vehicle related data (including ego query) to the rest of the queries
@@ -301,7 +306,7 @@ class MotionFormer(BaseFormer):
 
         ego_transform      = torch.eye(transform.shape[-1], device=device)
         ego_transform      = ego_transform[None, None, :, :].tile(batch_size, 1, 1, 1)
-        transform = torch.concat([transform, ego_transform], dim=1)
+        transform = torch.concat([ego_transform, transform], dim=1)
 
         if track_pad_mask is not None:
             track_pad_mask = torch.concat([
@@ -329,7 +334,7 @@ class MotionFormer(BaseFormer):
         # agent_anchors shape: (1, k, 1, 2)
         # scene_anchors shape: (N, k, num_agents, 2)
         transform      = transform[:, None]
-        agent_anchors  = agent_anchors[None, :, None, None, :]
+        agent_anchors  = self.agent_anchors[None, :, None, None, :]
         scene_anchors  = transform_points(agent_anchors, transform_matrix=transform)
         agent_anchors  = agent_anchors[..., 0, :]
         scene_anchors  = scene_anchors[..., 0, :]

@@ -15,8 +15,8 @@ def ddp_broadcast(val: torch.Tensor, src_rank: Union[int, str]):
     handle.wait()
 
 def ddp_sync_vals(
-        rank: int, 
         val: Union[int, float, torch.Tensor, List[Union[int, float]], np.ndarray],
+        rank: int,
         op: Optional[Enum]=None
     ) -> torch.Tensor:
     if isinstance(val, np.ndarray):
@@ -32,11 +32,11 @@ def ddp_sync_vals(
     handle.wait()
     return val
 
-def ddp_sync_metrics(rank: int, metrics: Dict[str, float]) -> Dict[str, float]:
+def ddp_sync_metrics(metrics: Dict[str, float], rank: int, op: Enum=distr.ReduceOp.AVG) -> Dict[str, float]:
     # Code runs on each device (rank).
     keys = list(metrics.keys())
     metrics_vals = list(metrics.values())
     metrics_vals = torch.tensor(metrics_vals, dtype=torch.float32, device=f"cuda:{rank}")
-    metrics_vals = ddp_sync_vals(rank, metrics_vals, op=distr.ReduceOp.AVG)
+    metrics_vals = ddp_sync_vals(rank, metrics_vals, op=op)
     metrics = {k:v.item() for k, v in zip(keys, metrics_vals)}
     return metrics

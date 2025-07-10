@@ -1,6 +1,10 @@
 import os
+import shutil
+import torch
 import pandas as pd
 import torch.nn as nn
+from datetime import datetime
+from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from modules.bevformer import BEVFormer
 from modules.trackformer import TrackFormer
@@ -14,42 +18,70 @@ from modules.lossfns.motion_loss import MotionLoss
 from modules.lossfns.occ_loss import OccLoss
 from modules.lossfns.plan_loss import PlanLoss
 from matplotlib import pyplot as plt
-from typing import List, Tuple, Dict, Union, Optional
+from typing import List, Tuple, Dict, Union, Optional, Any
+from utils.io_utils import save_yaml_file
 
 class BaseTrainer:
-    # purpose of the next 11 lines is for vscode highlight
+    # purpose of the next 12 lines is for vscode highlight
     bevformer: BEVFormer
-    trackformer: Optional[TrackFormer]=None,
-    track_lossfn: Optional[TrackLoss]=None,
-    mapformer: Optional[Union[VectorMapFormer, RasterMapFormer]]=None,
-    map_lossfn: Optional[Union[VectorMapLoss, RasterMapLoss]]=None,
-    motionformer: Optional[MotionFormer]=None,
-    motion_lossfn: Optional[MotionLoss]=None,
-    occformer: Optional[OccFormer]=None,
-    occ_lossfn: Optional[OccLoss]=None,
-    planformer: Optional[PlanFormer]=None,
-    plan_lossfn: Optional[PlanLoss]=None,
+    optimizer: torch.optim.Optimizer
+    trackformer: Optional[Union[TrackFormer, DDP]]
+    track_lossfn: Optional[TrackLoss]
+    mapformer: Optional[Union[VectorMapFormer, RasterMapFormer, DDP]]
+    map_lossfn: Optional[Union[VectorMapLoss, RasterMapLoss]]
+    motionformer: Optional[Union[MotionFormer, DDP]]
+    motion_lossfn: Optional[MotionLoss]
+    occformer: Optional[Union[OccFormer, DDP]]
+    occ_lossfn: Optional[OccLoss]
+    planformer: Optional[Union[PlanFormer, DDP]]
+    plan_lossfn: Optional[PlanLoss]
 
-    metrics_dir = "metrics/detection"
-    checkpoints_dir = "saved_model/detection/checkpoints"
-    best_model_dir = "saved_model/detection/best_model"
+    metrics_dir = "metrics"
+    checkpoints_dir = "checkpoints"
+    best_dir = "best_checkpoints"
+    config_dir = "configs"
 
-    def __init__(self, ddp_mode: bool=False, device_or_rank: Union[str, float]="cpu"):
+    def __init__(
+            self, 
+            ddp_mode: bool=False, 
+            device_or_rank: Union[int, str]="cpu", 
+            checkpoints_path: Optional[str]=None,
+            config_or_path: Optional[Union[str, Dict[str, Any]]]=None
+        ):
+        
+        if config_or_path:
+            assert isinstance(config_or_path, (str, dict))
+
         self.ddp_mode = ddp_mode
         self.device_or_rank = device_or_rank
+        self.checkpoints_path = checkpoints_path
+        self.config_or_path = config_or_path
         self._valid_modes = ["train", "eval"]
+
+        self.start_time = datetime.strftime(datetime.now(), "%d/%m/%Y %H-%M-%S")
+        self.metrics_dir = os.path.join("saved", self.start_time, self.metrics_dir)
+        self.checkpoints_dir = os.path.join("saved", self.start_time, self.checkpoints_dir)
+        self.best_dir = os.path.join("saved", self.start_time, self.best_dir)
+        self.config_dir = os.path.join("saved", self.start_time, self.config_dir)
 
         # collect metrics in this list of dicts
         self._train_metrics: List[Dict[str, float]] = []
         self._eval_metrics: List[Dict[str, float]] = []
 
-    def _toggle_module_mode(self, module_name: str, mode: str):
-        if hasattr(self, module_name):
-            getattr(getattr(self, module_name), mode)()
+        self._save_config()
 
-    def _zero_module_grads(self, module_name: str):
-        if hasattr(self, module_name):
-            getattr(self, module_name).zero_grad()
+    
+    def train(self, dataloader: DataLoader, verbose: bool=False) -> Dict[str, float]:
+        raise NotImplementedError
+    
+
+    def eval(self, dataloader: DataLoader, verbose: bool=False) -> Dict[str, float]:
+        raise NotImplementedError
+    
+
+    def step(self, dataloader: DataLoader, mode: str, verbose: bool=False) -> Dict[str, float]:
+        raise NotImplementedError
+
 
     def _set_module(self, module: Optional[nn.Module], name: str, is_model: bool):
         if module is not None:
@@ -58,26 +90,130 @@ class BaseTrainer:
                 getattr(self, name).to(self.device_or_rank)
                 if self.ddp_mode:
                     setattr(self, name, DDP(getattr(self, name), device_ids=[self.device_or_rank, ]))
-            
-    def save_metrics_plots(self, figsize: Tuple[float, float]=(15, 60)):
-        # metrics ought to be saved by only one device process since they will be collected
-        # and synced across all devices involved
-        if not self.ddp_mode or (self.ddp_mode and self.device_or_rank in [0, f"cuda:0"]):
-            self._save_metrics_plots("train", figsize)
-            self._save_metrics_plots("eval", figsize)
-    
-    def metrics_to_csv(self):
-        if not self.ddp_mode or (self.ddp_mode and self.device_or_rank in [0, f"cuda:0"]):
-            if not os.path.isdir(self.metrics_dir): 
-                os.makedirs(self.metrics_dir, exist_ok=True)
-            pd.DataFrame(self._train_metrics).to_csv(os.path.join(self.metrics_dir, "train_metrics.csv"), index=False)
-            pd.DataFrame(self._eval_metrics).to_csv(os.path.join(self.metrics_dir, "eval_metrics.csv"), index=False)
+                    
 
-    def _save_metrics_plots(self, mode: str, figsize: Tuple[float, float]=(15, 60)):        
+    def _toggle_module_mode(self, module_name: str, mode: str):
+        if hasattr(self, module_name):
+            getattr(getattr(self, module_name), mode)()
+
+
+    def _save_module(self, module_name: str, as_best: bool=False, epoch: Optional[int]=None):
+        if not hasattr(self, module_name):
+            return
+        module: nn.Module = getattr(self, module_name)
+        
+        if self.ddp_mode:
+            if self.device_or_rank != 0:
+                return
+            module: nn.Module = getattr(self, module_name).module
+        state_dict = module.state_dict()
+        
+        if as_best:
+            path = self.best_dir
+        else:
+            assert epoch is not None
+            path = os.path.join(self.checkpoints_dir, f"epoch_{str(epoch).zfill(4)}")
+        torch.save(state_dict, os.path.join(path, f"{module_name}_state.pth.tar"))
+
+
+    def _save_optimizer(self, as_best: bool=False, epoch: Optional[int]=None):
+        state_dict = self.optimizer.state_dict()
+        if as_best:
+            path = self.best_dir
+        else:
+            assert epoch is not None
+            path = os.path.join(self.checkpoints_dir, f"epoch_{str(epoch).zfill(4)}")
+        torch.save(state_dict, os.path.join(path, f"optimizer_state.pth.tar"))
+
+    
+    def _save_config(self):
+        if not self.config_or_path:
+            return
+        
+        if isinstance(self.config_or_path, str):
+            shutil.copy(self.config_or_path, self.config_dir)
+            return
+        save_yaml_file(self.config_or_path, self.config_dir)
+
+
+    def _load_state_dict(self, name: str, path: str, is_model: bool):
+        # if DDP mode, we do not only need to do this for rank-0 devices but
+        # across all devices to ensure that the model and optimizer states 
+        # begin at same point
+        if not hasattr(self, name):
+            return
+        file = os.path.join(path, f"{name}_state.pth.tar")
+
+        if not os.path.isfile(file):
+            return
+        state_dict = torch.load(file)
+
+        if not self.ddp_mode or not is_model:
+            getattr(self, name).load_state_dict(state_dict)
+        else:
+            getattr(self, name).module.load_state_dict(state_dict)
+
+    
+    def save_best(self):
+        self._save_module("bevformer", as_best=True)
+        self._save_module("trackformer", as_best=True)
+        self._save_module("mapformer", as_best=True)
+        self._save_module("motionformer", as_best=True)
+        self._save_module("occformer", as_best=True)
+        self._save_module("planformer", as_best=True)
+        self._save_optimizer(as_best=True)
+
+
+    def save_checkpoints(self, epoch: int):
+        self._save_module("bevformer", as_best=False, epoch=epoch)
+        self._save_module("trackformer", as_best=False, epoch=epoch)
+        self._save_module("mapformer", as_best=False, epoch=epoch)
+        self._save_module("motionformer", as_best=False, epoch=epoch)
+        self._save_module("occformer", as_best=False, epoch=epoch)
+        self._save_module("planformer", as_best=False, epoch=epoch)
+        self._save_optimizer(as_best=False, epoch=epoch)
+
+
+    def load_checkpoints(self, path: str):
+        self._load_state_dict("bevformer", path, is_model=True)
+        self._load_state_dict("trackformer", path, is_model=True)
+        self._load_state_dict("mapformer", path, is_model=True)
+        self._load_state_dict("motionformer", path, is_model=True)
+        self._load_state_dict("occformer", path, is_model=True)
+        self._load_state_dict("planformer", path, is_model=True)
+        self._load_state_dict("optimizer", path, is_model=False)
+            
+
+    def save_metrics(self, save_plot: bool, figsize: Tuple[float, float]=(15, 60)):
+        # metrics ought to be saved by only one device process since they will be collected
+        # and synced across all devices during training anyways
+        if self.ddp_mode and self.device_or_rank != 0:
+            return
+        train_metrics_df, eval_metrics_df = self._metrics_to_csv()
+        
+        if save_plot:
+            self._plot_and_save_metrics_df(train_metrics_df, figsize)
+            self._plot_and_save_metrics_df(eval_metrics_df, figsize)
+    
+
+    def _metrics_to_csv(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        if self.ddp_mode and self.device_or_rank != 0:
+            return
+        if not os.path.isdir(self.metrics_dir):
+            os.makedirs(self.metrics_dir, exist_ok=True)
+        train_metrics_df = pd.DataFrame(self._train_metrics)
+        train_metrics_df.to_csv(os.path.join(self.metrics_dir, "train_metrics.csv"), index=False)
+
+        eval_metrics_df = pd.DataFrame(self._eval_metrics)
+        eval_metrics_df.to_csv(os.path.join(self.metrics_dir, "eval_metrics.csv"), index=False)
+
+        return train_metrics_df, eval_metrics_df
+
+
+    def _plot_and_save_metrics_df(self, df: pd.DataFrame, mode: str, figsize: Tuple[float, float]=(15, 60)):        
         valid_modes = self._valid_modes
         if mode not in valid_modes:
             raise ValueError(f"mode must be one of {valid_modes}, got {mode}")
-        df = pd.DataFrame(getattr(self, f"_{mode}_metrics"))
         nrows = len(df.columns)
         fig, axs = plt.subplots(nrows, 1, figsize=figsize)
 
