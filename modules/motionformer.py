@@ -299,14 +299,12 @@ class MotionFormer(BaseFormer):
         device     = bev_features.device
 
         # include ego vehicle related data (including ego query) to the rest of the queries
-        ego_current_pos    = torch.zeros_like(agent_current_pos[:, [0], :])
-        agent_current_pos  = torch.concat([ego_current_pos, agent_current_pos], dim=1)
-
-        track_queries      = torch.concat([ego_query[:, None, :], track_queries], dim=1)
-
-        ego_transform      = torch.eye(transform.shape[-1], device=device)
-        ego_transform      = ego_transform[None, None, :, :].tile(batch_size, 1, 1, 1)
-        transform = torch.concat([ego_transform, transform], dim=1)
+        ego_current_pos   = torch.zeros_like(agent_current_pos[:, [0], :])
+        agent_current_pos = torch.concat([ego_current_pos, agent_current_pos], dim=1)
+        track_queries     = torch.concat([ego_query[:, None, :], track_queries], dim=1)
+        ego_transform     = torch.eye(transform.shape[-1], device=device)
+        ego_transform     = ego_transform[None, None, :, :].tile(batch_size, 1, 1, 1)
+        transform         = torch.concat([ego_transform, transform], dim=1)
 
         if track_pad_mask is not None:
             track_pad_mask = torch.concat([

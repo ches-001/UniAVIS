@@ -6,7 +6,9 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from utils.io_utils import load_pickle_file, load_json_file
 from utils.img_utils import generate_occupancy_map
-from utils.img_utils import polyline_2_xywh
+from utils.img_utils import polyline_2_xywh, savgol_kernel
+from utils.metric_utils import intra2inter_cluster_var_ratio
+from utils.img_utils import transform_points
 from ._container import FrameData, MultiFrameData, BatchMultiFrameData
 from typing import Union, Dict, Any, Tuple, Optional, List
 
@@ -242,55 +244,23 @@ class WaymoDataset(Dataset):
 
     @check_perf
     def _get_agent_motions(self, sample_dict: Dict[str, Any], frame_idx: int) -> torch.Tensor:
-        num_frames = len(sample_dict)
         max_horizon = max(self.motion_horizon, self.occupancy_horizon)
-        
-        current_timestamp = sample_dict[frame_idx]["timestamp_seconds"]
-        next_timestamp = sample_dict[frame_idx + 1]["timestamp_seconds"]
-
-        dt = next_timestamp - current_timestamp
-        iter_start = frame_idx
-        iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
-        iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
-
-        motions_maps = {}
-        for idx in range(iter_start, iter_end, iter_step):
-            laser_labels_path = sample_dict[idx]["laser_labels_path"]
-            laser_labels_list = load_pickle_file(laser_labels_path)
-
-            for obj_idx in range(0, len(laser_labels_list)):
-                obj_id = laser_labels_list[obj_idx]["id"]
-                obj_3d_bbox = laser_labels_list[obj_idx]["box"]
-                if (
-                    (obj_3d_bbox["center_x"] < self.xyz_range[0][0] or obj_3d_bbox["center_x"] > self.xyz_range[0][1])
-                    or (obj_3d_bbox["center_y"] < self.xyz_range[1][0] or obj_3d_bbox["center_y"] > self.xyz_range[1][1])
-                    or (obj_3d_bbox["center_z"] < self.xyz_range[2][0] or obj_3d_bbox["center_z"] > self.xyz_range[2][1])
-                ): continue
-                
-                if obj_id not in motions_maps:
-                    if idx == frame_idx:
-                        motions_maps[obj_id] = []
-                    else: continue
-                
-                obj_det = [
-                    obj_3d_bbox["center_x"],
-                    obj_3d_bbox["center_y"],
-                    obj_3d_bbox["center_z"],
-                    obj_3d_bbox["length"],
-                    obj_3d_bbox["width"],
-                    obj_3d_bbox["height"],
-                    obj_3d_bbox["heading"],
-                ]
-                motions_maps[obj_id].append(obj_det)
-        # NOTE: Nested tensors is experimental feature and may change behaviour in the future
+        motions = WaymoDataset.get_frame_agent_motions(
+            sample_dict=sample_dict, 
+            frame_idx=frame_idx, 
+            max_horizon=max_horizon, 
+            sample_freq=self.motion_sample_freq, 
+            xyz_range=self.xyz_range
+        )
+        pad_size = (max_horizon + 1) - motions.shape[1]
+        if pad_size != 0:
+            motions = F.pad(motions, (0, 0, 0, pad_size, 0, 0), mode="constant", value=-999)
         # shape: (num_detections, motion_timesteps, 8)
-        motions = torch.nested.nested_tensor(list(motions_maps.values())).to_padded_tensor(-999)
         return motions
 
     
     @check_perf
     def _generate_occupancy_map(self, agent_motions: torch.Tensor) -> torch.Tensor:
-        # shape: (num_detections, timesteps, H_bev, W_bev)
         occ_map = generate_occupancy_map(
             agent_motions[:, :self.occupancy_horizon, :], 
             map_hw=self.bev_map_hw,
@@ -299,6 +269,7 @@ class WaymoDataset(Dataset):
             y_min=self.xyz_range[1][0],
             y_max=self.xyz_range[1][1],
         )
+        # shape: (num_detections, timesteps, H_bev, W_bev)
         return occ_map
 
 
@@ -473,25 +444,47 @@ class WaymoDataset(Dataset):
     ) -> torch.Tensor:
         num_frames = len(sample_dict)
 
-        if frame_idx + 1 == num_frames:
-            return torch.tensor([], dtype=torch.float32)
-            
-        current_timestamp = sample_dict[frame_idx]["timestamp_seconds"]
-        next_timestamp = sample_dict[frame_idx + 1]["timestamp_seconds"]
-
         horizon = max(self.planning_horizon, self.motion_horizon)
+
+        # when frame_idx is the last index of a sample, there is no ego-vehicle motion data for future timesteps
+        # as there is no future timestep. In this case, we estimate the next possible future position based on
+        # the last position and the current position with the Savitzky Golay (savgol) kernel function, and all other 
+        # positions will be padded, because it does not seem wise to do this for all of the next future timesteps,
+        # one is enough
+        extrapolate_last = False
         
-        dt = next_timestamp - current_timestamp
-        iter_start = frame_idx + 1
-        iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
-        iter_end = min(num_frames, frame_idx + (iter_step * horizon) + 1)
+        if frame_idx + 1 == num_frames:
+            extrapolate_last = True
+            t0 = sample_dict[frame_idx - 1]["timestamp_seconds"]
+            t1 = sample_dict[frame_idx]["timestamp_seconds"]
+            dt = t1 - t0
+            iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
+            iter_start = frame_idx - iter_step
+            iter_end = frame_idx + 1
+        else:
+            t0 = sample_dict[frame_idx]["timestamp_seconds"]
+            t1 = sample_dict[frame_idx + 1]["timestamp_seconds"]
+            dt = t1 - t0
+            iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
+            iter_start = frame_idx + 1
+            iter_end = min(num_frames, iter_start + (iter_step * horizon))
 
         global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)
         global_positions = torch.from_numpy(global_positions).to(ego_pose.dtype)
-        ego_motions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))
+        ego_motions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))[:, :2]
         # shape: (timesteps, 2)
-        return ego_motions[:, :2].to(dtype=torch.float32)
+
+        if not extrapolate_last:
+            return ego_motions.to(dtype=torch.float32)
+        
+        kernel = savgol_kernel(num_coefs=3, num_power=3)
+        kernel  = kernel[None, None, 0, :].tile(2, 1, 1).flip(-1)
+        pad_size = kernel.shape[-1] // 2
+        ego_motions = F.pad(ego_motions.transpose(1, 0), pad=(pad_size, pad_size), mode="replicate")
+        ego_motions = F.conv1d(ego_motions[None], weight=kernel, groups=2)[0].transpose(0, 1)
+        ego_motions = ego_motions[[-1]] - ego_motions[[-2]]
+        return ego_motions
     
 
     @check_perf
@@ -523,8 +516,218 @@ class WaymoDataset(Dataset):
     @check_perf
     def _get_timestamp(self, frame_dict: Dict[str, Any]) -> torch.Tensor:
         return torch.tensor(frame_dict["timestamp_seconds"], dtype=torch.float32)
+
+    
+    @staticmethod
+    def get_frame_agent_motions(
+        sample_dict: Dict[str, Any], 
+        frame_idx: int, 
+        max_horizon: int, 
+        sample_freq: float, 
+        xyz_range: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]
+
+    ) -> torch.Tensor:
+        num_frames = len(sample_dict)
+
+        # when frame_idx is the last index of a sample, there is no agent motion data for future timesteps
+        # as there is no future timestep. In this case, we estimate the next possible future positions of identified agents
+        # based on the last positions and the current positions with the Savitzky Golay (savgol) kernel function, and all other 
+        # agent positions will be padded, because it does not seem wise to do this for all of the next future timesteps,
+        # one is enough
+        extrapolate_last = False
+
+        if frame_idx + 1 == num_frames:
+            extrapolate_last = True
+            t0 = sample_dict[frame_idx - 1]["timestamp_seconds"]
+            t1 = sample_dict[frame_idx]["timestamp_seconds"]
+            dt = t1 - t0
+            iter_start = frame_idx
+            iter_step = -max(1, round(1 / (dt * sample_freq)))
+            iter_end = iter_start + iter_step - 1
+        else:
+            t0 = sample_dict[frame_idx]["timestamp_seconds"]
+            t1 = sample_dict[frame_idx + 1]["timestamp_seconds"]
+            dt = t1 - t0
+            iter_step = max(1, round(1 / (dt * sample_freq)))
+            iter_start = frame_idx
+            iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
+
+        motions_maps = {}
+        for idx in range(iter_start, iter_end, iter_step):
+            laser_labels_path = sample_dict[idx]["laser_labels_path"]
+            laser_labels_list = load_pickle_file(laser_labels_path)
+
+            for obj_idx in range(0, len(laser_labels_list)):
+                obj_id = laser_labels_list[obj_idx]["id"]
+                obj_3d_bbox = laser_labels_list[obj_idx]["box"]
+                if (
+                    (obj_3d_bbox["center_x"] < xyz_range[0][0] or obj_3d_bbox["center_x"] > xyz_range[0][1])
+                    or (obj_3d_bbox["center_y"] < xyz_range[1][0] or obj_3d_bbox["center_y"] > xyz_range[1][1])
+                    or (obj_3d_bbox["center_z"] < xyz_range[2][0] or obj_3d_bbox["center_z"] > xyz_range[2][1])
+                ): continue
+                
+                if obj_id not in motions_maps:
+                    if idx == frame_idx:
+                        motions_maps[obj_id] = []
+                    else: continue
+                
+                obj_det = [
+                    obj_3d_bbox["center_x"],
+                    obj_3d_bbox["center_y"],
+                    obj_3d_bbox["center_z"],
+                    obj_3d_bbox["length"],
+                    obj_3d_bbox["width"],
+                    obj_3d_bbox["height"],
+                    obj_3d_bbox["heading"],
+                ]
+                motions_maps[obj_id].append(obj_det)
+
+        # NOTE: Nested tensors is experimental feature and may change behaviour in the future
+        motions = torch.nested.nested_tensor(list(motions_maps.values()))
+
+        if not extrapolate_last:
+            motions = motions.to_padded_tensor(-999)
+            return motions
+        
+        motions = motions.to_padded_tensor(0)
+        motions = motions[:, torch.arange(motions.shape[1]-1, -1, -1), :]
+
+        kernel = savgol_kernel(num_coefs=3, num_power=3)
+        kernel  = kernel[None, None, 0, :].tile(3, 1, 1).flip(-1)
+        pad_size = kernel.shape[-1] // 2
+        centers = F.pad(motions[..., :3].transpose(2, 1), pad=(pad_size, pad_size), mode="replicate")
+        centers = F.conv1d(centers, weight=kernel, groups=3).transpose(2, 1)
+        centers = centers[:, [-1], :]
+        motions = torch.concat([motions[:, [-1], :], torch.concat([centers, motions[:, [-1], 3:]], dim=-1)], dim=1)
+        return motions
+
     
     
     @staticmethod
     def collate_fn(batch: List[MultiFrameData], frames_per_sample: int) -> BatchMultiFrameData:
         return BatchMultiFrameData.from_multiframedata_list(batch, frames_per_sample)
+    
+
+    @staticmethod
+    def cluster_agent_motion_endpoints(
+        data_or_path: Union[str, Dict[str, Any]],
+        *,
+        num_clusters: int=6,
+        num_iters: int=100,
+        num_mut_gens: int=100,
+        mut_proba: float=0.9,
+        mut_sigma: float=0.1,
+        max_horizon: int=6,
+        sample_freq: float=2,
+        device: Union[int, str, torch.device]="cpu",
+        **kwargs
+    ) -> torch.Tensor:
+        
+        import tqdm
+        from modules.motionformer import MotionFormer
+
+        data = (
+            data_or_path
+            if isinstance(data_or_path, dict)
+            else load_pickle_file(data_or_path)
+        )
+        sample_freq = sample_freq / max_horizon
+        max_horizon = 1
+        dt = None
+        frame_steps = None
+
+        pbar = tqdm.tqdm(total=len(data), unit_scale=True)
+
+        endpoints_data = []
+        for sample_name in data:
+            sample_dict = data[sample_name]
+            num_frames = len(sample_dict)
+            frame_idx = 0
+            if dt is None:
+                dt = sample_dict[frame_idx + 1]["timestamp_seconds"] - sample_dict[frame_idx]["timestamp_seconds"]
+                frame_steps = max(1, round(1 / (sample_freq * dt)))
+
+            while frame_idx < num_frames:
+                pbar.update(frame_steps / (math.ceil(num_frames / frame_steps) * frame_steps))
+
+                if frame_idx + 1 == num_frames:
+                    continue
+                motion_data = WaymoDataset.get_frame_agent_motions(
+                    sample_dict, frame_idx, max_horizon=max_horizon, sample_freq=sample_freq, **kwargs
+                )
+                
+                first_points = motion_data[:, 0, :]
+                last_points = motion_data[:, -1, :]
+                
+                valid_points_mask = last_points[:, 0] != -999
+                if valid_points_mask.sum() == 0:
+                    continue
+
+                last_points = last_points[valid_points_mask]
+                first_points = first_points[valid_points_mask]
+                agent2scene_transform = MotionFormer.create_agent2scene_transforms(first_points[:, 6], first_points[:, :3])
+                scene2agent_transform = torch.linalg.inv(agent2scene_transform)
+                last_points = transform_points(last_points[:, None, :2], transform_matrix=scene2agent_transform)
+                endpoints_data.append(last_points[:, 0, :])
+                
+                frame_idx += frame_steps
+
+        pbar.close()
+        
+        endpoints_data = torch.concat(endpoints_data, dim=0).to(device)
+        
+        # initialize ccentroids with kmeans++ initialization technique
+        centroids = []
+        centroids.append(endpoints_data[torch.randint(0, endpoints_data.shape[0], size=(), device=device)])
+        for cidx in range(1, num_clusters):
+            stacked_centroids = torch.stack(centroids, dim=0)
+            dists_squared = (endpoints_data[:, None, :] - stacked_centroids[None, :, :]).pow(2).sum(dim=-1)
+            min_dists_squared = torch.min(dists_squared, dim=1).values
+            proba = min_dists_squared / min_dists_squared.sum()
+            centroids.append(endpoints_data[torch.multinomial(proba, num_samples=1)][0])
+
+        centroids = torch.stack(centroids, dim=0)
+        prev_centroids = None
+        converged = False
+
+        for _ in range(0, num_iters):
+            prev_centroids = centroids.clone()
+            dists = (endpoints_data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1).sqrt()
+            cluster_ids = torch.argmin(dists, dim=1)
+
+            for cidx in range(0, num_clusters):
+                mask = (cluster_ids == cidx)
+                if mask.any():
+                    centroids[cidx] = endpoints_data[mask].mean(dim=0)
+
+            if (prev_centroids == centroids).all():
+                converged = True
+                break
+        
+        dists = (endpoints_data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1).sqrt()
+        cluster_ids = torch.argmin(dists, dim=1)
+        
+        best_score = intra2inter_cluster_var_ratio(endpoints_data, centroids, cluster_ids)
+        best_gen = None
+
+        if converged:
+            return centroids, best_score, best_gen
+        
+        for gen in range(0, num_mut_gens):
+            mut_factor = torch.ones_like(centroids)
+
+            while (mut_factor == 1).all():
+                scale = torch.randn(1, device=device)
+                rand = torch.rand_like(centroids)
+                randn = torch.randn_like(centroids)
+                mut_factor = ((rand > mut_proba) * scale * randn * mut_sigma) + 1
+
+            new_centroids = centroids + mut_factor
+            new_score = intra2inter_cluster_var_ratio(endpoints_data, new_centroids, cluster_ids)
+
+            if new_score < best_score:
+                centroids = new_centroids
+                best_score = new_score
+                best_gen = gen
+
+        return centroids, best_score, best_gen

@@ -298,6 +298,7 @@ def overlap_img_masks(masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 def savgol_kernel(num_coefs: int=5, num_power: int=4, device: Union[str, int, torch.device]="cpu") -> torch.Tensor:
+    """https://en.wikipedia.org/wiki/Savitzky%E2%80%93Golay_filter#Appendix"""
     coefs = torch.arange(-(num_coefs//2), num_coefs//2+1, device=device)
     powers = torch.arange(num_power, device=device)
     J = coefs[:, None].pow(powers[None, :]).float()
