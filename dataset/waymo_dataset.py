@@ -621,7 +621,7 @@ class WaymoDataset(Dataset):
         sample_freq: float=2,
         device: Union[int, str, torch.device]="cpu",
         **kwargs
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, float, float, float, int]:
         
         import tqdm
         from modules.motionformer import MotionFormer
@@ -692,7 +692,7 @@ class WaymoDataset(Dataset):
 
         for _ in range(0, num_iters):
             prev_centroids = centroids.clone()
-            dists = (endpoints_data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1).sqrt()
+            dists = (endpoints_data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1)
             cluster_ids = torch.argmin(dists, dim=1)
 
             for cidx in range(0, num_clusters):
@@ -704,10 +704,12 @@ class WaymoDataset(Dataset):
                 converged = True
                 break
         
-        dists = (endpoints_data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1).sqrt()
+        dists = (endpoints_data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1)
         cluster_ids = torch.argmin(dists, dim=1)
         
-        best_score = intra2inter_cluster_var_ratio(endpoints_data, centroids, cluster_ids)
+        best_intra_var, best_inter_var, best_score = intra2inter_cluster_var_ratio(
+            endpoints_data, centroids, cluster_ids
+        )
         best_gen = None
 
         if converged:
@@ -723,11 +725,14 @@ class WaymoDataset(Dataset):
                 mut_factor = ((rand > mut_proba) * scale * randn * mut_sigma) + 1
 
             new_centroids = centroids + mut_factor
-            new_score = intra2inter_cluster_var_ratio(endpoints_data, new_centroids, cluster_ids)
-
+            new_intra_var, new_inter_var, new_score = intra2inter_cluster_var_ratio(
+                endpoints_data, new_centroids, cluster_ids
+            )
             if new_score < best_score:
                 centroids = new_centroids
                 best_score = new_score
+                best_intra_var = new_intra_var
+                best_inter_var = new_inter_var
                 best_gen = gen
 
-        return centroids, best_score, best_gen
+        return centroids, best_score.item(), best_intra_var.item(), best_inter_var.item(), best_gen

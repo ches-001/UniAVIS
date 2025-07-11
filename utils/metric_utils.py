@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import Optional, Tuple
 
 def compute_2d_ciou(preds_2dbox: torch.Tensor, targets_2dbox: torch.Tensor) -> torch.Tensor:
     """
@@ -127,18 +127,26 @@ def intra2inter_cluster_var_ratio(
         data: torch.Tensor, 
         centroids: torch.Tensor, 
         cluster_ids: Optional[torch.Tensor]=None
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     
     if cluster_ids is None:
-        dists = (data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1).sqrt()
+        dists = (data[:, None, :] - centroids[None, :, :]).pow(2).sum(dim=-1)
         cluster_ids = torch.argmin(dists, dim=1)
 
     avg_score = 0
+    avg_intra_var = 0
+    avg_inter_var = 0
+
     for i in range(0, centroids.shape[0]):
         m = (cluster_ids == i)
         alt_m = ~m
         intra_var = (data[m] - centroids[i]).pow(2).mean()
         inter_var = (data[alt_m] - centroids[i]).pow(2).mean()
-        avg_score += intra_var / inter_var
-    avg_score /= centroids.shape[0]
-    return avg_score
+        avg_intra_var += intra_var
+        avg_inter_var += inter_var
+
+    avg_intra_var /= centroids.shape[0]
+    avg_inter_var /= centroids.shape[0]
+    avg_score = avg_intra_var / avg_inter_var
+
+    return avg_intra_var, avg_inter_var, avg_score
