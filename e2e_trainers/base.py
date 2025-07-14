@@ -18,7 +18,7 @@ from modules.lossfns.motion_loss import MotionLoss
 from modules.lossfns.occ_loss import OccLoss
 from modules.lossfns.plan_loss import PlanLoss
 from matplotlib import pyplot as plt
-from typing import List, Tuple, Dict, Union, Optional, Any
+from typing import List, Tuple, Dict, Union, Optional, Any, Iterable
 from utils.io_utils import save_yaml_file
 
 class BaseTrainer:
@@ -35,6 +35,7 @@ class BaseTrainer:
     occ_lossfn: Optional[OccLoss]
     planformer: Optional[Union[PlanFormer, DDP]]
     plan_lossfn: Optional[PlanLoss]
+    lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]
 
     metrics_dir = "metrics"
     checkpoints_dir = "checkpoints"
@@ -83,13 +84,41 @@ class BaseTrainer:
         raise NotImplementedError
 
 
-    def _set_module(self, module: Optional[nn.Module], name: str, is_model: bool):
+    def set_module(self, module: Optional[nn.Module], name: str, is_model: bool):
         if module is not None:
             setattr(self, name, module)
             if is_model:
                 getattr(self, name).to(self.device_or_rank)
                 if self.ddp_mode:
                     setattr(self, name, DDP(getattr(self, name), device_ids=[self.device_or_rank, ]))
+
+    
+    def set_optimizer(self, optim_name: str, **kwargs):
+        params = []
+        if hasattr(self, "bevformer"):
+            params.append(self.bevformer.parameters())
+        if hasattr(self, "trackformer"):
+            params.append(self.trackformer.parameters())
+        if hasattr(self, "mapformer"):
+            params.append(self.mapformer.parameters())
+        if hasattr(self, "motionformer"):
+            params.append(self.motionformer.parameters())
+        if hasattr(self, "occformer"):
+            params.append(self.occformer.parameters())
+        if hasattr(self, "planformer"):
+            params.append(self.planformer.parameters())
+        if len(params) == 0:
+            raise ValueError("model params for optimizer cannot be empty")
+        
+        setattr(self, "optimizer", getattr(torch.optim, optim_name)(params=params, **kwargs))
+
+
+    def set_lr_scheduler(self, scheduler_name: str, interval: int, **kwargs):
+        if not hasattr(self, "optimizer") or self.optimizer is not None:
+            raise ValueError("self.optimizer must be set to a non-NoneType value before setting a scheduler")
+        assert isinstance(interval, int)
+        setattr(self, "lr_scheduler", getattr(torch.optim.lr_scheduler, scheduler_name)(optimizer=self.optimizer, *kwargs))
+        setattr(self, "lr_scheduler_interval", interval)
                     
 
     def _toggle_module_mode(self, module_name: str, mode: str):

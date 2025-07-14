@@ -602,7 +602,6 @@ class WaymoDataset(Dataset):
         return motions
 
     
-    
     @staticmethod
     def collate_fn(batch: List[MultiFrameData], frames_per_sample: int) -> BatchMultiFrameData:
         return BatchMultiFrameData.from_multiframedata_list(batch, frames_per_sample)
@@ -617,7 +616,7 @@ class WaymoDataset(Dataset):
         num_mut_gens: int=100,
         mut_proba: float=0.9,
         mut_sigma: float=0.1,
-        max_horizon: int=6,
+        max_horizon: int=12,
         sample_freq: float=2,
         device: Union[int, str, torch.device]="cpu",
         **kwargs

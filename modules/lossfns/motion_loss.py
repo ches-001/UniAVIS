@@ -1,4 +1,5 @@
 import torch
+import torch.linalg
 import torch.nn as nn
 from utils.img_utils import transform_points
 from typing import Optional, Tuple
@@ -8,7 +9,7 @@ class MotionLoss(nn.Module):
     def __init__(self, cls_lambda: float, reg_lambda: float, as_gmm: bool=False, collapsed_gmm: bool=False):
         super(MotionLoss, self).__init__()
         """
-        cls_lambda: mode classification weight, only applicable if as_gmm is True
+        cls_lambda: mode classification weight, only applicable if as_gmm is False
 
         reg_lambda: regression weight, only applicable if as_gmm is True
 
@@ -16,8 +17,9 @@ class MotionLoss(nn.Module):
             If set to False, the mode  whose mean has the least distance from the target is selected as the distribution to use
             when computing the log likelihood of the target belonging to that distribution
 
-        collapsed_gmm: applicable only if as_gmm is True, this argument controls whether the GMM is collapsed before computing the
-            likelihood or if the weighted sum of likelihood of each individual mode is computed.
+        collapsed_gmm: applicable only if as_gmm is True, this argument controls whether the GMM is collapsed to a single 
+            distribution parameterized with its composite first and second moments before computing the likelihood
+            or if the weighted sum of likelihood of each individual mode is computed.
         """
         self.cls_lambda = cls_lambda
         self.reg_lambda = reg_lambda
@@ -254,3 +256,116 @@ class MotionLoss(nn.Module):
         mahal_dist = mahal_dist[..., 0, 0]
         log_proba = -0.5 * (mahal_dist + torch.log(covar_det) + (d * torch.log(two_pi)))
         return log_proba
+    
+
+    @staticmethod
+    def multishooting_solver(
+        motions: torch.Tensor, 
+        pred_pos: torch.Tensor, 
+        t_splits: int=3, 
+        dt: float=0.5,
+        lambda_xy: float=0.01,
+        lambda_goal: float=0.05,
+        lambda_kinematics: float=0.1,
+        iter_steps: int=10,
+        lr=1e-3,
+        verbose: bool=False,
+        **kwargs
+    ) -> torch.Tensor:
+        """
+        motions: (N, num_agents, T, 6), [x, y, x', y', x'', y'']
+            The extra point in the trajectory corresponds to the target positions, velocities and accelerations
+            at t = 0.
+
+        initial_pos: (N, num_agents, 2), [x, y], predicted (imprecise) positions
+
+        t_splits: number of segments to split the time horizon
+
+        dt: time between two consecutive points
+        """
+        h_motions = torch.concat([motions, torch.ones_like(motions[..., [0]])], dim=-1)
+        X = h_motions[..., :-1, :]
+        X_T = X.transpose(-1, -2)
+        Y = h_motions[..., 1:, :2]
+
+        M = torch.linalg.inv(X_T @ X) @ (X_T @ Y)
+        ERRS = (X @ M) - Y
+        M_ERR = torch.linalg.inv(X_T @ X) @ (X_T @ ERRS)
+
+        dynamics = lambda x : (x @ M) - (x @ M_ERR)
+
+        t_horizon = h_motions.shape[2] // t_splits
+        h_motions[..., 0, :2] = pred_pos.detach()
+
+        # TODO: include other kinematic factors curvature and curvature rate and jerk. Factor them both
+        # here and in the cost function
+        initial_pos = nn.Parameter(h_motions[..., t_horizon::t_horizon, None, :2].clone(), requires_grad=True)
+        initial_vel = nn.Parameter(h_motions[..., t_horizon::t_horizon, None, 2:4].clone(), requires_grad=True)
+        initial_accel = nn.Parameter(h_motions[..., t_horizon::t_horizon, None, 4:6].clone(), requires_grad=True)
+
+        optimizer = torch.optim.Adam([initial_pos, initial_vel, initial_accel], lr=lr, **kwargs)
+
+        best_shots = None
+        best_step = None
+        best_cost = torch.inf
+
+        for step in range(0, iter_steps):
+            num_points = h_motions.shape[-2]
+            shots = torch.concat([h_motions[..., [0], None, :2], initial_pos], dim=-3)
+            shots_vel = torch.concat([h_motions[..., [0], None, 2:4], initial_vel], dim=-3)
+            shots_accel = torch.concat([h_motions[..., [0], None, 4:6], initial_accel], dim=-3)
+            ones = h_motions[..., ::t_horizon, None, [6]]
+
+            for i in range(1, t_horizon+1):
+                pos_xy_t_minus_1 = shots[..., [i-1], :]
+                vel_xy_t_minus_1 = shots_vel[..., [i-1], :]
+                accel_xy_t_minus_1 = shots_accel[..., [i-1], :]
+
+                input = torch.concat([pos_xy_t_minus_1, vel_xy_t_minus_1, accel_xy_t_minus_1, ones], dim=-1)
+
+                current_shot = dynamics(input)
+                current_vel = (current_shot - pos_xy_t_minus_1) / dt
+                current_accel = (current_vel - vel_xy_t_minus_1) / dt
+
+                shots = torch.concat([shots, current_shot], dim=-2)
+                shots_vel = torch.concat([shots_vel, current_vel], dim=-2)
+                shots_accel = torch.concat([shots_accel, current_accel], dim=-2)
+
+            shots = torch.concat([shots[..., 0, [0], :], shots[..., 1:, :].flatten(-3, -2)], dim=-2)
+            shots_vel = torch.concat([shots_vel[..., 0, [0], :], shots_vel[..., 1:, :].flatten(-3, -2)], dim=-2)
+            shots_accel = torch.concat([shots_accel[..., 0, [0], :], shots_accel[..., 1:, :].flatten(-3, -2)], dim=-2)
+
+            t_indexes = list(range(t_horizon, num_points))[::t_horizon]
+            last_t = num_points - 1
+            if last_t not in t_indexes:
+                t_indexes.append(last_t)
+
+            shots = shots[..., :num_points, :]
+            shots_vel = shots_vel[..., :num_points, :]
+            shots_accel = shots_accel[..., :num_points, :]
+
+            targets = h_motions[..., :2]
+            targets_vel = h_motions[..., 2:4]
+            targets_accel = h_motions[..., 4:6]
+
+            pos_cost = lambda_xy * nn.functional.mse_loss(shots, targets, reduction="mean")
+            goal_cost = lambda_goal * nn.functional.mse_loss(shots[..., t_indexes, :], targets[..., t_indexes, :], reduction="mean")
+            vel_cost = nn.functional.mse_loss(shots_vel[..., t_indexes, :], targets_vel[..., t_indexes, :], reduction="mean")
+            accel_cost = nn.functional.mse_loss(shots_accel[..., t_indexes, :], targets_accel[..., t_indexes, :], reduction="mean")
+
+            cost = pos_cost + goal_cost + (lambda_kinematics * (vel_cost + accel_cost))
+            cost.backward()
+            optimizer.step()
+
+            if cost < best_cost:
+                best_cost = cost.item()
+                best_shots = shots.detach()
+                best_step = step
+
+            if verbose:
+                print(f"multishooting iter step: {step}, cost: {cost :.4f}")
+        
+        if verbose:
+            print(f"\nbest iter step: {best_step}, best cost: {best_cost :.4f}")
+
+        return best_shots

@@ -40,3 +40,14 @@ def ddp_sync_metrics(metrics: Dict[str, float], rank: int, op: Enum=distr.Reduce
     metrics_vals = ddp_sync_vals(rank, metrics_vals, op=op)
     metrics = {k:v.item() for k, v in zip(keys, metrics_vals)}
     return metrics
+
+
+def ddp_log(log: str, device: Union[str, int], is_ddp: bool, device_to_log: Union[str, int]=-1):
+    if is_ddp:
+        if device_to_log != -1:
+            if device == device_to_log:
+                print(log)
+        else:
+            print(log)
+        return
+    print(log)

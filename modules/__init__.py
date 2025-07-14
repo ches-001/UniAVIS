@@ -36,4 +36,6 @@ PAPERS:
 17. HDMapNet: An Online HD Map Construction and Evaluation Framework
 
 18. Combining Camera–LiDAR Fusion and Motion Planning Using Bird’s-Eye View Representation for End-to-End Autonomous Driving
+
+19. nuPlan: A closed-loop ML-based planning benchmark for autonomous vehicles
 """

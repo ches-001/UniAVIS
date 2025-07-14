@@ -7,12 +7,35 @@ z_ref_range: &z_ref_range [-5.0, 3.0]
 num_motion_modes: &num_motion_modes 6
 max_num_agents: &max_num_agents 500
 max_num_map_elements: &max_num_map_elements 500
+motion_horizon: &motion_horizon 12
+occ_horizon: &occ_horizon 5
+plan_horizon: &plan_horizon 6
+motion_sample_freq: &motion_sample_freq 2.0
 
 cam_img_hw: [480, 640]
 num_cloud_points: 100000
-frames_per_sample: 4
+frames_per_sample: 3
 sample_horizon_secs: 2.0
 max_num_polyline_points: 1000
+
+dataset:
+  motion_horizon: *motion_horizon
+  occupancy_horizon: *occ_horizon
+  planning_horizon: *plan_horizon
+  bev_map_hw: *bev_feature_hw
+  cam_img_hw: *cam_img_hw
+  ego_vehicle_dims: [5.182, 2.032, 1.778]
+  num_cloud_points: *num_cloud_points
+  xyz_range: [*x_range, *y_range, *z_ref_range]
+  frames_per_sample: 3
+  sample_period_secs: *sample_horizon_secs
+  max_num_agents: *max_num_agents
+  max_num_map_elements: *max_num_map_elements
+  max_num_polyline_points: *max_num_polyline_points
+  motion_sample_freq: *motion_sample_freq
+  pad_polylines_out_of_index: False
+  motion_command_opts: null
+  stop_command_disp_thresh: 0.5
 
 bevformer:
   in_img_channels: 3
@@ -87,7 +110,7 @@ motionformer:
   num_layers: 3
   num_modes: *num_motion_modes
   num_ref_points: 4
-  pred_horizon: 12
+  pred_horizon: *motion_horizon
   dim_feedforward: 512
   dropout: 0.1
   offset_scale: 1.0
@@ -101,7 +124,7 @@ occformer:
   max_num_agents: *max_num_agents
   num_modes: *num_motion_modes
   num_ref_points: 4
-  pred_horizon: 5
+  pred_horizon: *occ_horizon
   dim_feedforward: 512
   dropout: 0.1
   offset_scale: 1.0
@@ -114,13 +137,63 @@ occformer:
 planformer:
   num_heads: 8
   embed_dim: *embed_dim
-  num_commands: 5
+  num_commands: 4
   num_layers: 3
   num_modes: *num_motion_modes
   num_ref_points: 4
-  pred_horizon: 6
+  pred_horizon: *plan_horizon
   dim_feedforward: 512
   dropout: 0.1
   offset_scale: 1.0
   learnable_pe: True
   bev_feature_hw: *bev_feature_hw
+
+motion_cluster:
+  num_clusters: *num_motion_modes
+  num_iters: 100
+  num_mut_gens: 100
+  mut_proba: 0.9
+  mut_sigma: 0.1
+  max_horizon: *motion_horizon
+  sample_freq: *motion_sample_freq
+
+track_loss:
+  cls_lambda: 1.0
+  iou_lambda: 1.0
+  l1_lambda: 0.01
+  angle_lambda: 1.0
+
+vectormap_loss:
+  cls_lambda: 1.0
+  iou_lambda: 1.0
+  l1_lambda: 0.01
+  polygen_lambda: 1.0
+
+rastermap_loss:
+  cls_lambda: 1.0
+  iou_lambda: 1.0
+  l1_lambda: 0.01
+  polygen_lambda: 1.0
+
+motion_loss:
+  cls_lambda: 1.0
+  reg_lambda: 1.0
+  as_gmm: False
+  collapsed_gmm: False
+
+occ_loss:
+  bce_lambda: 1.0
+  dice_lambda: 1.0
+  main_lambda: 1.0
+  aux_lambda: 1.0
+
+plan_loss:
+  dist_lambda: 1.0
+  col_lambda: 1.0
+  weight_tilda_pair:  [[1.0, 0.0], [0.4, 0.5], [0.1, 1.0]]
+
+optimizer:
+  name: "Adam"
+  kwargs:
+    lr: 2e-4
+    weight_decay: 0.0

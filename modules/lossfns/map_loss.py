@@ -13,9 +13,10 @@ class VectorMapLoss(TrackLoss):
             cls_lambda: float, 
             iou_lambda: float, 
             l1_lambda: float,
+            polygen_lambda: float,
         ):
         super(VectorMapLoss, self).__init__(cls_lambda, iou_lambda, l1_lambda, angle_lambda=0)
-
+        self.polygen_lambda = polygen_lambda
         del self.angle_lambda
 
 
@@ -64,7 +65,7 @@ class VectorMapLoss(TrackLoss):
         polygen_loss = self._cls_loss(pred_polylines, target_polylines, torch.arange(target_polylines.shape[0], device=device))
         polygen_loss = polygen_loss.mean()
 
-        loss = det_loss + polygen_loss
+        loss = det_loss + (self.polygen_lambda * polygen_loss)
         return loss, pred_indexes, target_indexes, polygen_loss_mask
     
 
@@ -184,5 +185,5 @@ class RasterMapLoss(VectorMapLoss):
         pos_weight = (neg_sum / (pos_sum + eps))
 
         polygen_loss = F.binary_cross_entropy_with_logits(pred_seg_masks, target_seg_masks, pos_weight=pos_weight, reduction="mean")
-        loss = det_loss + polygen_loss
+        loss = det_loss + (self.polygen_lambda * polygen_loss)
         return loss, pred_indexes, target_indexes, polygen_loss_mask

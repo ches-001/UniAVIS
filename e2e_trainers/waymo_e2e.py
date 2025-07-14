@@ -16,10 +16,10 @@ LOGGER = logging.getLogger(__name__)
 
 class WaymoE2ETrainer(BaseTrainer):
     def __init__(
-        self, 
-        bevformer: BEVFormer,
-        optimizer: torch.optim.Optimizer,
+        self,
         *,
+        bevformer: Optional[BEVFormer]=None,
+        optimizer: Optional[torch.optim.Optimizer]=None,
         trackformer: Optional[TrackFormer]=None,
         track_lossfn: Optional[TrackLoss]=None,
         mapformer: Optional[Union[VectorMapFormer, RasterMapFormer]]=None,
@@ -31,7 +31,7 @@ class WaymoE2ETrainer(BaseTrainer):
         planformer: Optional[PlanFormer]=None,
         plan_lossfn: Optional[PlanLoss]=None,
         lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]=None,
-        lr_scheduler_step: int=10,
+        lr_scheduler_interval: int=10,
         checkpoints_path: Optional[str]=None,
         device_or_rank: Union[int, str]="cpu",
         ddp_mode: bool=False,
@@ -39,22 +39,22 @@ class WaymoE2ETrainer(BaseTrainer):
     ):
         super(WaymoE2ETrainer, self).__init__(ddp_mode, device_or_rank, checkpoints_path, config_or_path)
 
-        self._set_module(bevformer, "bevformer", is_model=True)
-        self._set_module(trackformer, "trackformer", is_model=True)
-        self._set_module(mapformer, "mapformer", is_model=True)
-        self._set_module(motionformer, "motionformer", is_model=True)
-        self._set_module(occformer, "occformer", is_model=True)
-        self._set_module(planformer, "planformer", is_model=True)
+        self.set_module(bevformer, "bevformer", is_model=True)
+        self.set_module(trackformer, "trackformer", is_model=True)
+        self.set_module(mapformer, "mapformer", is_model=True)
+        self.set_module(motionformer, "motionformer", is_model=True)
+        self.set_module(occformer, "occformer", is_model=True)
+        self.set_module(planformer, "planformer", is_model=True)
 
-        self._set_module(track_lossfn, "track_lossfn", is_model=False)
-        self._set_module(map_lossfn, "map_lossfn", is_model=False)
-        self._set_module(motion_lossfn, "motion_lossfn", is_model=False)
-        self._set_module(occ_lossfn, "occ_lossfn", is_model=False)
-        self._set_module(plan_lossfn, "plan_lossfn", is_model=False)
+        self.set_module(track_lossfn, "track_lossfn", is_model=False)
+        self.set_module(map_lossfn, "map_lossfn", is_model=False)
+        self.set_module(motion_lossfn, "motion_lossfn", is_model=False)
+        self.set_module(occ_lossfn, "occ_lossfn", is_model=False)
+        self.set_module(plan_lossfn, "plan_lossfn", is_model=False)
 
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-        self.lr_scheduler_step = lr_scheduler_step
+        self.lr_scheduler_interval = lr_scheduler_interval
         self.last_epoch = 0
 
         # load checkpoints if any
@@ -66,11 +66,12 @@ class WaymoE2ETrainer(BaseTrainer):
         metrics = self.step(dataloader, "train", verbose)
         self._train_metrics.append(metrics)
 
-        if self.lr_scheduler and (self.last_epoch % self.lr_scheduler_step == 0):
+        if self.lr_scheduler and (self.last_epoch % self.lr_scheduler_interval == 0):
             self.lr_scheduler.step()
             if verbose:
-                lr = self.lr_scheduler.optimizer.param_groups[0]["lr"]
-                print(f"Current LR: {lr :.6f}")
+                if not self.ddp_mode or self.device_or_rank:
+                    lr = self.lr_scheduler.optimizer.param_groups[0]["lr"]
+                    print(f"Current LR: {lr :.6f}")
         self.last_epoch += 1
 
         return metrics
@@ -111,7 +112,7 @@ class WaymoE2ETrainer(BaseTrainer):
         # purpose of this line is for vscode highlight
         sample_batch: BatchMultiFrameData
 
-        avg_track_loss, avg_map_loss, avg_motion_loss, avg_occ_loss, avg_plan_loss = [0.0] * 5
+        avg_loss, avg_track_loss, avg_map_loss, avg_motion_loss, avg_occ_loss, avg_plan_loss = [0.0] * 6
 
         for step, sample_batch in pbar:
             t_frames = sample_batch.cam_views.shape[1]
@@ -304,7 +305,10 @@ class WaymoE2ETrainer(BaseTrainer):
             loss.backward()
             self.optimizer.step()
 
+            avg_loss += loss.item()
+
         metrics = {
+            "loss": avg_loss,
             "track_loss": avg_track_loss, 
             "map_loss": avg_map_loss, 
             "motion_loss": avg_motion_loss, 
@@ -321,8 +325,9 @@ class WaymoE2ETrainer(BaseTrainer):
             metrics = ddp_sync_metrics(metrics, self.device_or_rank)
 
         if verbose:
-            log_msg = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
-            time = datetime.strftime(datetime.now(), "%d/%m/%Y %H:%M:%S")
-            print(f"[Step {step} @ {time}] {log_msg}")
+            if not self.ddp_mode or self.device_or_rank == 0:
+                log_msg = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+                time = datetime.strftime(datetime.now(), "%d/%m/%Y %H:%M:%S")
+                print(f"[Step {step} @ {time}] {log_msg}")
             
         return metrics

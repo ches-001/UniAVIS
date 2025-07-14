@@ -108,7 +108,7 @@ class BEVFormerEncoderLayer(nn.Module):
         out1 = self.temporal_self_attn(
             queries=bev_queries, 
             ref_points=tsa_ref_points, 
-            value=bev_queries,
+            value=bev_histories,
             value_spatial_shapes=bev_spatial_shape,
             normalize_ref_points=False 
         )
@@ -116,7 +116,7 @@ class BEVFormerEncoderLayer(nn.Module):
         out2 = self.add_norm1(out1, bev_queries)
 
         out3 = self.spatial_cross_attn(
-            queries=bev_queries,
+            queries=out2,
             ref_points=sca_ref_points,
             value=multiscale_fmaps,
             value_spatial_shapes=multiscale_fmap_shapes,
