@@ -40,10 +40,10 @@ class FrameData(DeviceChangeMixin):
         The tensor is of shape [V_cam, 4, 4]
 
     agent_motions: This tensor contains the movement trajectory of dynamic agents in a given frame from timestep t to an
-        arbitrary future timestep t+n. This tensor is of shape [N_agents, motion_timesteps, 2], as you might have guessed, 
-        these tracks are gotten from the x and y values of the tracks from various timesteps. These motion
-        tracks do not contain position data of the current timestep, unlike the occupancy map that contains the occupancy
-        of the current timestep
+        arbitrary future timestep t+n. This tensor is of shape [N_agents, motion_timesteps+1, 6], 
+        The (+1) is here because the current position of agents is included in the data unlike at the first timestamp
+        however, it is not used to train the MotionFormer, only the subsequent points are.
+        6 for [x, y, v_x, v_y, a_x, a_y]. These motion tracks do not contain position data of the current timestep, 
 
     occupancy_map: This tensor contains the future occupancy of dynamic agents on a BEV (Bird Eye View) grid map. 
         The tensor is of shape [N_agents, occ_timesteps, H_bev, W_bev], where H_bev and W_bev are the height and width 
@@ -56,8 +56,9 @@ class FrameData(DeviceChangeMixin):
         of shape [num_elements, 5] (4 for box data (x, y, w, h) and 1 for class label)
 
     ego_motions: This tensor contains movement trajectory (waypoints) of ego vehicle in ego vehicle coordinates, The tensor 
-        is of shape [max(motion_timesteps, plan_timesteps), 2]. It only has two dimensions because it the trajectory corresponds
-        to movement along the BEV frame, which is a 2D frame.
+        is of shape [max(motion_timesteps, plan_timesteps)+1, 6], 6 for [x, y, v_x, v_y, a_x, a_y].
+        The extra timestep at the begining corresponds to the current position of the ego vehicle, which is not used as part of'
+        the targets for the PlanFormer.
         The ego trajectory serves as targets to ego motion from the MotionFormer, and planned trajectory from the PlanFormer.
 
     command: This tensor encodes high-level commands for ego motion planning (like 'turn-left', 'turn-right', 'go-straight', etc), 

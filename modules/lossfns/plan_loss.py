@@ -14,11 +14,11 @@ class PlanLoss(nn.Module):
         super(PlanLoss, self).__init__()
 
         """
-        dist_lambda: weight value for distance loss between predicted and target trajectories
+        :dist_lambda: weight value for distance loss between predicted and target trajectories
 
-        col_lambda: weight value for collision loss
+        :col_lambda: weight value for collision loss
 
-        weight_tilda_pair: weight and pad value pair (w, tilda) for collision loss. For each pair, the multi-agent boxes
+        :weight_tilda_pair: weight and pad value pair (w, tilda) for collision loss. For each pair, the multi-agent boxes
             are spaced by the corresponding tilda value and a weighted sum of each is performeed, with w as weights
         """
         self.dist_lambda = dist_lambda
@@ -36,18 +36,18 @@ class PlanLoss(nn.Module):
             transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
-        pred_motion: (N, T, 2), predicted trajectory (x, y)
+        :pred_motion: (N, T, 2), predicted trajectory (x, y)
 
-        target_motion: (N, T, 2), target trajectory (x, y)
+        :target_motion: (N, T, 2), target trajectory (x, y)
 
-        ego_size: (N, 2) box size (w, h) of ego vehicle
+        :ego_size: (N, 2) box size (w, h) of ego vehicle
 
-        multiagent_size: (N, num_agents, 2), box sizes (w, h) of other agents (no ego trajectory)
+        :multiagent_size: (N, num_agents, 2), box sizes (w, h) of other agents (no ego trajectory)
 
-        multiagents_motions: (N, num_agents, T, 2), trajectory of other agents (no ego trajectory)
+        :multiagents_motions: (N, num_agents, T, 2), trajectory of other agents (no ego trajectory)
             NOTE: This trajectory must be in ego (scene-level) vehicle frame
 
-        transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
+        :transform: (N, num_agents, 3, 3), transformation matrix from agent level to scene (ego) level
             if this is None, the function assumes that the multiagents_motions is already projected to scene level.
         """
         device = pred_motion.device
@@ -95,13 +95,13 @@ class PlanLoss(nn.Module):
             mask: torch.Tensor
         ) -> torch.Tensor:
         """
-        ego_box_traj: (N, 1, 1, T, 4)
+        :ego_box_traj: (N, 1, 1, T, 4)
         
-        multiagent_box_traj: (N, num_agents, num_tilda, T, 4)
+        :multiagent_box_traj: (N, num_agents, num_tilda, T, 4)
 
-        weights: (1, 1, num_weights), num_tilda is same as num_weights
+        :weights: (1, 1, num_weights), num_tilda is same as num_weights
 
-        mask: (N, T)
+        :mask: (N, T)
         """
         num_agents = multiagent_box_traj.shape[1]
         num_tilda = multiagent_box_traj.shape[2]

@@ -96,6 +96,7 @@ def generate_occupancy_map(
     --------------------------------
     :agent_motions: 
         shape: (num_detections, num_timesteps, D)
+        D = [x, y, l, w, angle]
 
     :map_hw:
         BEV (Bird Eye View) 2D size
@@ -122,10 +123,10 @@ def generate_occupancy_map(
     num_dets, num_timesteps = agent_motions.shape[:2]
 
     relative_xy_corners = torch.stack([
-        torch.stack([-agent_motions[..., 3], -agent_motions[..., 4]], dim=2),
-        torch.stack([+agent_motions[..., 3], -agent_motions[..., 4]], dim=2),
-        torch.stack([+agent_motions[..., 3], +agent_motions[..., 4]], dim=2),
-        torch.stack([-agent_motions[..., 3], +agent_motions[..., 4]], dim=2)
+        torch.stack([-agent_motions[..., 2], -agent_motions[..., 3]], dim=2),
+        torch.stack([+agent_motions[..., 2], -agent_motions[..., 3]], dim=2),
+        torch.stack([+agent_motions[..., 2], +agent_motions[..., 3]], dim=2),
+        torch.stack([-agent_motions[..., 2], +agent_motions[..., 3]], dim=2)
     ], dim=2)
     relative_xy_corners /= 2
 

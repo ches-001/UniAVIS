@@ -2,29 +2,40 @@ import torch
 import torch.linalg
 import torch.nn as nn
 from utils.img_utils import transform_points
-from typing import Optional, Tuple
+from misc.multishooting import multishooting_solver
+from typing import Optional, Tuple, Dict, Any
 
 
 class MotionLoss(nn.Module):
-    def __init__(self, cls_lambda: float, reg_lambda: float, as_gmm: bool=False, collapsed_gmm: bool=False):
+    def __init__(
+            self, 
+            cls_lambda: float, 
+            reg_lambda: float, 
+            as_gmm: bool=False, 
+            collapsed_gmm: bool=False,
+            multishooting_kwargs: Optional[Dict[str, Any]]=None
+        ):
         super(MotionLoss, self).__init__()
         """
-        cls_lambda: mode classification weight, only applicable if as_gmm is False
+        :cls_lambda: mode classification weight, only applicable if as_gmm is False
 
-        reg_lambda: regression weight, only applicable if as_gmm is True
+        :reg_lambda: regression weight, only applicable if as_gmm is True
 
-        as_gmm: as Gaussian mixture model, if set to True, the k predicted modes are treated like a Gaussian mixture model.
+        :as_gmm: as Gaussian mixture model, if set to True, the k predicted modes are treated like a Gaussian mixture model.
             If set to False, the mode  whose mean has the least distance from the target is selected as the distribution to use
             when computing the log likelihood of the target belonging to that distribution
 
-        collapsed_gmm: applicable only if as_gmm is True, this argument controls whether the GMM is collapsed to a single 
+        :collapsed_gmm: applicable only if as_gmm is True, this argument controls whether the GMM is collapsed to a single 
             distribution parameterized with its composite first and second moments before computing the likelihood
             or if the weighted sum of likelihood of each individual mode is computed.
+
+        :multishooting_kwargs: kwargs for multi-shooting algorithm (used for target motion alignment wrt predicted position)
         """
         self.cls_lambda = cls_lambda
         self.reg_lambda = reg_lambda
         self.as_gmm = as_gmm
         self.collapsed_gmm = collapsed_gmm
+        self.multishooting_kwargs = multishooting_kwargs or {}
 
     
     def forward(
@@ -32,26 +43,39 @@ class MotionLoss(nn.Module):
             pred_motions: torch.Tensor, 
             pred_mode_scores: torch.Tensor, 
             target_motions: torch.Tensor,
+            pred_pos: Optional[torch.Tensor]=None,
+            ego_pred_pos: Optional[torch.Tensor]=None,
             ego_pred_motions: Optional[torch.Tensor]=None,
             ego_pred_mode_scores: Optional[torch.Tensor]=None,
             ego_target_motions: Optional[torch.Tensor]=None,
             transform: Optional[torch.Tensor]=None
         ) -> torch.Tensor:
         """
-        pred_motions: (N, num_agents, k, T, 5), where k and T are number of modes and timesteps
+        :pred_motions: (N, num_agents, k, T, 5), where k and T are number of modes and timesteps
 
-        pred_mode_scores: (N, num_agents, k)
+        :pred_mode_scores: (N, num_agents, k)
 
-        target_motions: (N, num_agents, T, 2), this motion data is in scene (ego) level
+        :target_motions: (N, num_agents, T+1, 6), this motion data is in scene (ego) level
 
-        ego_pred_motions: (N, k, T, 5), ego motion predictions
+        :pred_pos: (N, num_agents, 2) agents' predicted positions from upstream module
 
-        ego_pred_mode_scores: (N, k), ego motion predictions
+        :ego_pred_pos: (N, 2) ego vehicle predicted positions from upstream module
 
-        ego_target_motions: (N, T, 2), ego target motion
+        :ego_pred_motions: (N, k, T, 5), ego motion predictions
 
-        transform: (N, num_agents, 4, 4), transformation matrix from agent level to scene (ego) level
+        :ego_pred_mode_scores: (N, k), ego motion predictions
+
+        :ego_target_motions: (N, T+1, 6), ego target motion
+
+        :transform: (N, num_agents, 4, 4), transformation matrix from agent level to scene (ego) level
             if this is None, the function assumes that the multiagents_trajs is already projected to scene level.
+
+        NOTE: The target motions have one time point extra than the predictions, this is because of the multi-shooting
+            algorithm, used to adjust the target trajectories to be kinematically feasible given the predicted position
+            of the agent from the upstream module (The TrackFormer), this time point is not regressed with the predicted
+            motions. The last dimension is also 6, curresponding to position, velocity and acceleration along the x, y
+            axes, these extra kinematic terms are not used as targets for the motion_loss, they are only used for the
+            multi-shooting algorithm, for kinematic alignment.
         """
         if transform is not None:
             assert (
@@ -72,6 +96,20 @@ class MotionLoss(nn.Module):
                 ego_transform = torch.eye(transform.shape[-1])[None, None, :, :]
                 ego_transform = ego_transform.tile(transform.shape[0], 1, 1, 1)
                 transform = torch.concat([ego_transform, transform], axis=1)
+
+        if pred_pos is not None:
+            if ego_pred_pos is not None:
+                pred_pos = torch.concat([ego_pred_pos[:, None, :], pred_pos], dim=1)
+                pred_pos = pred_pos.detach()
+
+            pos_pad_mask = (target_motions != -999).all(dim=-1)
+            target_motions = multishooting_solver(
+                motions=target_motions, 
+                pred_pos=pred_pos, 
+                pad_mask=pos_pad_mask, 
+                **self.multishooting_kwargs
+            )
+            target_motions = target_motions[..., 1:, :]
         
         if self.as_gmm:
             if self.collapsed_gmm:
@@ -256,116 +294,3 @@ class MotionLoss(nn.Module):
         mahal_dist = mahal_dist[..., 0, 0]
         log_proba = -0.5 * (mahal_dist + torch.log(covar_det) + (d * torch.log(two_pi)))
         return log_proba
-    
-
-    @staticmethod
-    def multishooting_solver(
-        motions: torch.Tensor, 
-        pred_pos: torch.Tensor, 
-        t_splits: int=3, 
-        dt: float=0.5,
-        lambda_xy: float=0.01,
-        lambda_goal: float=0.05,
-        lambda_kinematics: float=0.1,
-        iter_steps: int=10,
-        lr=1e-3,
-        verbose: bool=False,
-        **kwargs
-    ) -> torch.Tensor:
-        """
-        motions: (N, num_agents, T, 6), [x, y, x', y', x'', y'']
-            The extra point in the trajectory corresponds to the target positions, velocities and accelerations
-            at t = 0.
-
-        initial_pos: (N, num_agents, 2), [x, y], predicted (imprecise) positions
-
-        t_splits: number of segments to split the time horizon
-
-        dt: time between two consecutive points
-        """
-        h_motions = torch.concat([motions, torch.ones_like(motions[..., [0]])], dim=-1)
-        X = h_motions[..., :-1, :]
-        X_T = X.transpose(-1, -2)
-        Y = h_motions[..., 1:, :2]
-
-        M = torch.linalg.inv(X_T @ X) @ (X_T @ Y)
-        ERRS = (X @ M) - Y
-        M_ERR = torch.linalg.inv(X_T @ X) @ (X_T @ ERRS)
-
-        dynamics = lambda x : (x @ M) - (x @ M_ERR)
-
-        t_horizon = h_motions.shape[2] // t_splits
-        h_motions[..., 0, :2] = pred_pos.detach()
-
-        # TODO: include other kinematic factors curvature and curvature rate and jerk. Factor them both
-        # here and in the cost function
-        initial_pos = nn.Parameter(h_motions[..., t_horizon::t_horizon, None, :2].clone(), requires_grad=True)
-        initial_vel = nn.Parameter(h_motions[..., t_horizon::t_horizon, None, 2:4].clone(), requires_grad=True)
-        initial_accel = nn.Parameter(h_motions[..., t_horizon::t_horizon, None, 4:6].clone(), requires_grad=True)
-
-        optimizer = torch.optim.Adam([initial_pos, initial_vel, initial_accel], lr=lr, **kwargs)
-
-        best_shots = None
-        best_step = None
-        best_cost = torch.inf
-
-        for step in range(0, iter_steps):
-            num_points = h_motions.shape[-2]
-            shots = torch.concat([h_motions[..., [0], None, :2], initial_pos], dim=-3)
-            shots_vel = torch.concat([h_motions[..., [0], None, 2:4], initial_vel], dim=-3)
-            shots_accel = torch.concat([h_motions[..., [0], None, 4:6], initial_accel], dim=-3)
-            ones = h_motions[..., ::t_horizon, None, [6]]
-
-            for i in range(1, t_horizon+1):
-                pos_xy_t_minus_1 = shots[..., [i-1], :]
-                vel_xy_t_minus_1 = shots_vel[..., [i-1], :]
-                accel_xy_t_minus_1 = shots_accel[..., [i-1], :]
-
-                input = torch.concat([pos_xy_t_minus_1, vel_xy_t_minus_1, accel_xy_t_minus_1, ones], dim=-1)
-
-                current_shot = dynamics(input)
-                current_vel = (current_shot - pos_xy_t_minus_1) / dt
-                current_accel = (current_vel - vel_xy_t_minus_1) / dt
-
-                shots = torch.concat([shots, current_shot], dim=-2)
-                shots_vel = torch.concat([shots_vel, current_vel], dim=-2)
-                shots_accel = torch.concat([shots_accel, current_accel], dim=-2)
-
-            shots = torch.concat([shots[..., 0, [0], :], shots[..., 1:, :].flatten(-3, -2)], dim=-2)
-            shots_vel = torch.concat([shots_vel[..., 0, [0], :], shots_vel[..., 1:, :].flatten(-3, -2)], dim=-2)
-            shots_accel = torch.concat([shots_accel[..., 0, [0], :], shots_accel[..., 1:, :].flatten(-3, -2)], dim=-2)
-
-            t_indexes = list(range(t_horizon, num_points))[::t_horizon]
-            last_t = num_points - 1
-            if last_t not in t_indexes:
-                t_indexes.append(last_t)
-
-            shots = shots[..., :num_points, :]
-            shots_vel = shots_vel[..., :num_points, :]
-            shots_accel = shots_accel[..., :num_points, :]
-
-            targets = h_motions[..., :2]
-            targets_vel = h_motions[..., 2:4]
-            targets_accel = h_motions[..., 4:6]
-
-            pos_cost = lambda_xy * nn.functional.mse_loss(shots, targets, reduction="mean")
-            goal_cost = lambda_goal * nn.functional.mse_loss(shots[..., t_indexes, :], targets[..., t_indexes, :], reduction="mean")
-            vel_cost = nn.functional.mse_loss(shots_vel[..., t_indexes, :], targets_vel[..., t_indexes, :], reduction="mean")
-            accel_cost = nn.functional.mse_loss(shots_accel[..., t_indexes, :], targets_accel[..., t_indexes, :], reduction="mean")
-
-            cost = pos_cost + goal_cost + (lambda_kinematics * (vel_cost + accel_cost))
-            cost.backward()
-            optimizer.step()
-
-            if cost < best_cost:
-                best_cost = cost.item()
-                best_shots = shots.detach()
-                best_step = step
-
-            if verbose:
-                print(f"multishooting iter step: {step}, cost: {cost :.4f}")
-        
-        if verbose:
-            print(f"\nbest iter step: {best_step}, best cost: {best_cost :.4f}")
-
-        return best_shots

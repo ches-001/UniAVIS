@@ -218,15 +218,18 @@ class WaymoE2ETrainer(BaseTrainer):
                     raise Exception(f"Invalid mapformer type {type(self.mapformer)}")
 
             if hasattr(self, "motionformer"):
-                agent2scene_transform = MotionFormer.create_agent2scene_transforms(
-                    angles=track_preds[..., 6], locs=track_preds[..., :3]
-                )
+                track_preds = torch.gather(track_preds, dim=2, index=track_pred_indexes[..., None])
+                track_preds = track_preds[:, :, 0]
 
                 track_queries = torch.gather(track_queries, dim=2, index=track_pred_indexes[..., None])
                 track_queries = track_queries[:, :, 0]
 
                 map_queries = torch.gather(map_queries, dim=2, index=map_pred_indexes[..., None])
                 map_queries = map_queries[:, :, 0]
+
+                agent2scene_transform = MotionFormer.create_agent2scene_transforms(
+                    angles=track_preds[..., 6], locs=track_preds[..., :3]
+                )
 
                 motion_queries, pred_motions, mode_scores, ego_motion_data = self.motionformer.forward(
                     agent_current_pos=track_preds[..., :2],
@@ -241,8 +244,8 @@ class WaymoE2ETrainer(BaseTrainer):
                 ego_motion_query = ego_motion_data["ego_query"]
 
                 if hasattr(self, "motion_lossfn"):
-                    target_motions = sample_batch.agent_motions[:, 1:, ...]
-                    ego_target_motions = sample_batch.agent_motions[:, 0, ...]
+                    target_motions = sample_batch.agent_motions
+                    ego_target_motions = sample_batch.ego_motions
 
                     target_motions = torch.gather(target_motions, dim=2, index=track_target_indexes[..., None])
                     target_motions = target_motions[:, :, 0]
@@ -254,6 +257,8 @@ class WaymoE2ETrainer(BaseTrainer):
                         pred_motions=pred_motions,
                         pred_mode_scores=mode_scores,
                         target_motions=target_motions,
+                        pred_pos=track_preds[..., :2],
+                        ego_pred_pos=ego_track_preds[..., :2],
                         ego_pred_motions=ego_pred_motions,
                         ego_pred_mode_scores=ego_mode_scores,
                         ego_target_motions=ego_target_motions,
@@ -288,14 +293,15 @@ class WaymoE2ETrainer(BaseTrainer):
                 )
 
                 if hasattr(self, "plan_lossfn"):
-                    target_plan_motion = sample_batch.ego_motions[:, :self.planformer.pred_horizon, :]
+                    plan_horizon = self.planformer.pred_horizon
+                    target_plan_motion = sample_batch.ego_motions[:, 1:1+plan_horizon, :2]
 
                     plan_loss = self.plan_lossfn.forward(
                         pred_motion=pred_plan_motion,
                         target_motion=target_plan_motion,
                         ego_size=ego_track_labels[..., 4:6],
                         multiagent_size=track_labels[..., 4:6],
-                        multiagents_motions=target_motions,
+                        multiagents_motions=target_motions[..., 1:1+plan_horizon, :2],
                         transform=None
                     )
                     avg_plan_loss += plan_loss

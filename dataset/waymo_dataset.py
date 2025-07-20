@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from utils.io_utils import load_pickle_file, load_json_file
 from utils.img_utils import generate_occupancy_map
-from utils.img_utils import polyline_2_xywh, savgol_kernel
+from utils.img_utils import polyline_2_xywh
 from utils.metric_utils import intra2inter_cluster_var_ratio
 from utils.img_utils import transform_points
 from ._container import FrameData, MultiFrameData, BatchMultiFrameData
@@ -154,6 +154,25 @@ class WaymoDataset(Dataset):
         sample_name, frame_idx = self._search_for_idx(idx)
         sample_dict = self.data[sample_name]
 
+        # Considering that the original data has a sample frequency of 10Hz (0.1sec between 2 consecutive frames)
+        # It means that there are some points in time where we will be unable to get motion data of agents and ego
+        # vehicle. For example, if the number of frames per sample is 198 and frame_idx = 190, if we sample at 2Hz, 
+        # the next motion point will be at frame_idx 195 and the next at frame_idx 200, which is an invalid index 
+        # for a size of 198. Even if we decide to only use positional motion data at frame_idx 190 and 195, we will
+        # only have a single velocity value, but and no acceleration value. We need atleast 2 velocity values, 
+        # this is necessary for the multi-shooting solver used in the motion_lossfn, hence we cap frame_idx like so:
+
+        # frame_idx = min(frame_idx, num_frames - (3 * offset) - 1)
+        # where: offset = max(1, round(freq / new_freq))
+        # where: freq = 10 Hz and new_freq = 2Hz
+
+        num_frames = len(sample_dict)
+        t1 = sample_dict[1]["timestamp_seconds"]
+        t0 = sample_dict[0]["timestamp_seconds"]
+        offset = max(1, round(1 / ((t1 - t0) * self.motion_sample_freq)))
+        last_frame_idx = num_frames - (3 * offset) - 1
+        frame_idx = min(frame_idx, last_frame_idx)
+
         frames = []
         obj_id_map = {}
         frame_indexes = self._sample_frame_indexes_from_horizon(sample_dict, frame_idx)
@@ -189,11 +208,10 @@ class WaymoDataset(Dataset):
 
         if not is_partial_data:
             agent_motions = self._get_agent_motions(sample_dict, frame_idx)
-            occupancy_map = self._generate_occupancy_map(agent_motions)
+            occupancy_map = self._generate_occupancy_map(agent_motions[..., [0, 1, 6, 7, 8]])
             ego_motions = self._get_ego_motions(sample_dict, frame_idx, ego_pose)
-            command = self._get_high_level_command(ego_motions)
+            command = self._get_high_level_command(ego_motions[1:, :2])
             map_elements_polylines, map_elements_boxes = self._load_bev_map_elements(frame_dict)
-            agent_motions = agent_motions[:, 1:, :2]
 
             # pad targets
             map_element_pad = max(0, self.max_num_map_elements - map_elements_polylines.shape[0])
@@ -220,7 +238,9 @@ class WaymoDataset(Dataset):
             map_cls_pad_val = len(self.metadata["LABELS"]["MAP_ELEMENT_LABEL_INDEXES"])
             map_elements_boxes[:, -1][map_elements_boxes[:, -1] == -999] = map_cls_pad_val
 
-        det_pad = self.max_num_agents - tracks.shape[0]
+        # we add +1 below because rthe tracks data also includes that of the ego vehicle, as the
+        # first track
+        det_pad = (self.max_num_agents + 1) - tracks.shape[0]
         det_cls_pad_val = len(self.metadata["LABELS"]["DETECTION_LABEL_INDEXES"])
         tracks = F.pad(tracks, pad=(0, 0, 0, det_pad), mode="constant", value=-999)
         tracks[:, -1][tracks[:, -1] == -999] = det_cls_pad_val
@@ -250,12 +270,26 @@ class WaymoDataset(Dataset):
             frame_idx=frame_idx, 
             max_horizon=max_horizon, 
             sample_freq=self.motion_sample_freq, 
-            xyz_range=self.xyz_range
+            xyz_range=self.xyz_range,
         )
+        # [x, y, l, w, angle]
+        motions = motions[..., [0, 1, 3, 4, 6]]
+
+        # impute past velocity with average of the first two velocities
+        vel = self.motion_sample_freq * (motions[:, 1:, :2] - motions[:, :-1, :2])
+        vel = torch.concat([(vel[:, [0], :] + vel[:, [1], :]) / 2, vel], dim=1)
+        
+        # impute past accelerations with average of the last two accelerations
+        accel = self.motion_sample_freq * (vel[:, 1:, :2] - vel[:, :-1, :2])
+        accel = torch.concat([(accel[:, [0], :] + accel[:, [1], :]) / 2, accel], dim=1)
+
+        # [x, y, vx, vy, ax, ay, l, w, angle]
+        motions = torch.concat([motions[..., :2], vel, accel, motions[..., 2:]], dim=-1)
+        
         pad_size = (max_horizon + 1) - motions.shape[1]
         if pad_size != 0:
             motions = F.pad(motions, (0, 0, 0, pad_size, 0, 0), mode="constant", value=-999)
-        # shape: (num_detections, motion_timesteps, 8)
+        # shape: (num_detections, motion_timesteps+1, 8)
         return motions
 
     
@@ -442,49 +476,35 @@ class WaymoDataset(Dataset):
         frame_idx: int,
         ego_pose: torch.Tensor
     ) -> torch.Tensor:
-        num_frames = len(sample_dict)
-
-        horizon = max(self.planning_horizon, self.motion_horizon)
-
-        # when frame_idx is the last index of a sample, there is no ego-vehicle motion data for future timesteps
-        # as there is no future timestep. In this case, we estimate the next possible future position based on
-        # the last position and the current position with the Savitzky Golay (savgol) kernel function, and all other 
-        # positions will be padded, because it does not seem wise to do this for all of the next future timesteps,
-        # one is enough
-        extrapolate_last = False
         
-        if frame_idx + 1 == num_frames:
-            extrapolate_last = True
-            t0 = sample_dict[frame_idx - 1]["timestamp_seconds"]
-            t1 = sample_dict[frame_idx]["timestamp_seconds"]
-            dt = t1 - t0
-            iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
-            iter_start = frame_idx - iter_step
-            iter_end = frame_idx + 1
-        else:
-            t0 = sample_dict[frame_idx]["timestamp_seconds"]
-            t1 = sample_dict[frame_idx + 1]["timestamp_seconds"]
-            dt = t1 - t0
-            iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
-            iter_start = frame_idx + 1
-            iter_end = min(num_frames, iter_start + (iter_step * horizon))
+        num_frames = len(sample_dict)
+        horizon = max(self.planning_horizon, self.motion_horizon)
+        
+        t0 = sample_dict[frame_idx]["timestamp_seconds"]
+        t1 = sample_dict[frame_idx + 1]["timestamp_seconds"]
+        dt = t1 - t0
+        iter_step = max(1, round(1 / (dt * self.motion_sample_freq)))
+        iter_start = frame_idx
+        iter_end = min(num_frames, frame_idx + (iter_step * horizon) + 1)
 
         global_positions = [sample_dict[idx]["ego_pose"][:, -1] for idx in range(iter_start, iter_end, iter_step)]
         global_positions = np.stack(global_positions, axis=0)
         global_positions = torch.from_numpy(global_positions).to(ego_pose.dtype)
-        ego_motions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))[:, :2]
-        # shape: (timesteps, 2)
 
-        if not extrapolate_last:
-            return ego_motions.to(dtype=torch.float32)
-        
-        kernel = savgol_kernel(num_coefs=3, num_power=3)
-        kernel  = kernel[None, None, 0, :].tile(2, 1, 1).flip(-1)
-        pad_size = kernel.shape[-1] // 2
-        ego_motions = F.pad(ego_motions.transpose(1, 0), pad=(pad_size, pad_size), mode="replicate")
-        ego_motions = F.conv1d(ego_motions[None], weight=kernel, groups=2)[0].transpose(0, 1)
-        ego_motions = ego_motions[[-1]] - ego_motions[[-2]]
+        # shape: (timesteps, 2)
+        ego_motions = torch.matmul(global_positions, torch.linalg.inv(ego_pose).permute(1, 0))[:, :2]
+
+        # impute past velocity with average of the last two velocities
+        vel = self.motion_sample_freq * (ego_motions[1:] - ego_motions[:-1])
+        vel = torch.concat([(vel[[0]] + vel[[1]]) / 2, vel], dim=0)
+
+        # impute past accelerations with average of the last two accelerations
+        accel = self.motion_sample_freq * (vel[1:] - vel[:-1])
+        accel = torch.concat([(accel[[0]] + accel[[1]]) / 2, accel], dim=0)
+
+        ego_motions = torch.concat([ego_motions, vel, accel], dim=-1)
         return ego_motions
+        
     
 
     @check_perf
@@ -525,33 +545,16 @@ class WaymoDataset(Dataset):
         max_horizon: int, 
         sample_freq: float, 
         xyz_range: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]
-
     ) -> torch.Tensor:
         num_frames = len(sample_dict)
-
-        # when frame_idx is the last index of a sample, there is no agent motion data for future timesteps
-        # as there is no future timestep. In this case, we estimate the next possible future positions of identified agents
-        # based on the last positions and the current positions with the Savitzky Golay (savgol) kernel function, and all other 
-        # agent positions will be padded, because it does not seem wise to do this for all of the next future timesteps,
-        # one is enough
-        extrapolate_last = False
-
-        if frame_idx + 1 == num_frames:
-            extrapolate_last = True
-            t0 = sample_dict[frame_idx - 1]["timestamp_seconds"]
-            t1 = sample_dict[frame_idx]["timestamp_seconds"]
-            dt = t1 - t0
-            iter_start = frame_idx
-            iter_step = -max(1, round(1 / (dt * sample_freq)))
-            iter_end = iter_start + iter_step - 1
-        else:
-            t0 = sample_dict[frame_idx]["timestamp_seconds"]
-            t1 = sample_dict[frame_idx + 1]["timestamp_seconds"]
-            dt = t1 - t0
-            iter_step = max(1, round(1 / (dt * sample_freq)))
-            iter_start = frame_idx
-            iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
-
+        
+        t0 = sample_dict[frame_idx]["timestamp_seconds"]
+        t1 = sample_dict[frame_idx + 1]["timestamp_seconds"]
+        dt = t1 - t0
+        iter_step = max(1, round(1 / (dt * sample_freq)))
+        iter_start = frame_idx
+        iter_end = min(num_frames, frame_idx + (iter_step * max_horizon) + 1)
+        
         motions_maps = {}
         for idx in range(iter_start, iter_end, iter_step):
             laser_labels_path = sample_dict[idx]["laser_labels_path"]
@@ -584,24 +587,10 @@ class WaymoDataset(Dataset):
 
         # NOTE: Nested tensors is experimental feature and may change behaviour in the future
         motions = torch.nested.nested_tensor(list(motions_maps.values()))
-
-        if not extrapolate_last:
-            motions = motions.to_padded_tensor(-999)
-            return motions
-        
-        motions = motions.to_padded_tensor(0)
-        motions = motions[:, torch.arange(motions.shape[1]-1, -1, -1), :]
-
-        kernel = savgol_kernel(num_coefs=3, num_power=3)
-        kernel  = kernel[None, None, 0, :].tile(3, 1, 1).flip(-1)
-        pad_size = kernel.shape[-1] // 2
-        centers = F.pad(motions[..., :3].transpose(2, 1), pad=(pad_size, pad_size), mode="replicate")
-        centers = F.conv1d(centers, weight=kernel, groups=3).transpose(2, 1)
-        centers = centers[:, [-1], :]
-        motions = torch.concat([motions[:, [-1], :], torch.concat([centers, motions[:, [-1], 3:]], dim=-1)], dim=1)
+        motions = motions.to_padded_tensor(-999)
         return motions
-
     
+
     @staticmethod
     def collate_fn(batch: List[MultiFrameData], frames_per_sample: int) -> BatchMultiFrameData:
         return BatchMultiFrameData.from_multiframedata_list(batch, frames_per_sample)
@@ -655,8 +644,8 @@ class WaymoDataset(Dataset):
                     sample_dict, frame_idx, max_horizon=max_horizon, sample_freq=sample_freq, **kwargs
                 )
                 
-                first_points = motion_data[:, 0, :]
-                last_points = motion_data[:, -1, :]
+                first_points = motion_data[:, 0, [0, 1, 2, 6]]
+                last_points = motion_data[:, -1, [0, 1, 2, 6]]
                 
                 valid_points_mask = last_points[:, 0] != -999
                 if valid_points_mask.sum() == 0:
@@ -664,7 +653,7 @@ class WaymoDataset(Dataset):
 
                 last_points = last_points[valid_points_mask]
                 first_points = first_points[valid_points_mask]
-                agent2scene_transform = MotionFormer.create_agent2scene_transforms(first_points[:, 6], first_points[:, :3])
+                agent2scene_transform = MotionFormer.create_agent2scene_transforms(first_points[:, 3], first_points[:, :3])
                 scene2agent_transform = torch.linalg.inv(agent2scene_transform)
                 last_points = transform_points(last_points[:, None, :2], transform_matrix=scene2agent_transform)
                 endpoints_data.append(last_points[:, 0, :])
